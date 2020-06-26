@@ -1489,6 +1489,8 @@ dmu_objset_upgrade_task_cb(void *data)
 static void
 dmu_objset_upgrade(objset_t *os, dmu_objset_upgrade_cb_t cb)
 {
+	return;
+#if 0
 	if (os->os_upgrade_id != 0)
 		return;
 
@@ -1503,6 +1505,7 @@ dmu_objset_upgrade(objset_t *os, dmu_objset_upgrade_cb_t cb)
 			os->os_upgrade_status = ENOMEM;
 	}
 	mutex_exit(&os->os_upgrade_lock);
+#endif
 }
 
 static void
