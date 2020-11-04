@@ -1231,7 +1231,7 @@ mlxcx_rx_ring_start(mlxcx_t *mlxp, mlxcx_ring_group_t *g,
 			break;
 		mlxcx_buf_return(mlxp, b);
 	}
-	for (j = 0; j < rq->mlwq_nents / 2; ++j) {
+	for (j = 0; j < rq->mlwq_nents / 4; ++j) {
 		if (!mlxcx_buf_create(mlxp, rq->mlwq_bufs, &b))
 			break;
 		mlxcx_buf_return(mlxp, b);
