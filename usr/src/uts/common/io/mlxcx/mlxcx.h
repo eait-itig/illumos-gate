@@ -318,6 +318,7 @@ typedef enum {
 	MLXCX_EQ_INTR_ENABLED	= 1 << 5,	/* ddi_intr_enable()'d */
 	MLXCX_EQ_INTR_ACTIVE	= 1 << 6,	/* 'rupt handler running */
 	MLXCX_EQ_INTR_QUIESCE	= 1 << 7,	/* 'rupt handler to quiesce */
+	MLXCX_EQ_ATTACHING	= 1 << 8,	/* mlxcx_attach still running */
 } mlxcx_eventq_state_t;
 
 typedef struct mlxcx_bf {
