@@ -25,18 +25,13 @@
  * C Shell
  */
 
-static long pargc;
-static long gnleft;
-static long pnleft;
 int	globcnt;
-tchar	*arginp;
-static tchar *pargs;
+
 tchar	*gpath, *gpathp, *lastgpathp;
 int	globbed;
 bool	noglob;
 bool	nonomatch;
 tchar	*entp;
-static tchar *pargcp;
 tchar	**sortbas;
 int	sortscmp(tchar **, tchar **);
 void	ginit(tchar **);
@@ -805,12 +800,12 @@ backeval(tchar *cp, bool literal)
 		HIST = 0;
 		(void) lex(&paraml);
 		HIST = oHIST;
-		if (err_msg)
-			error("%s", gettext(err_msg));
+		if (err)
+			error("%s", gettext(err));
 		alias(&paraml);
 		t = syntax(paraml.next, &paraml, 0);
-		if (err_msg)
-			error("%s", gettext(err_msg));
+		if (err)
+			error("%s", gettext(err));
 		if (t)
 			t->t_dflg |= FPAR;
 		(void) signal(SIGTSTP, SIG_IGN);

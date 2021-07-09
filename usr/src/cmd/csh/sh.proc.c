@@ -12,6 +12,8 @@
  * specifies the terms and conditions for redistribution.
  */
 
+#pragma ident	"%Z%%M%	%I%	%E% SMI"
+
 #include "sh.h"
 #include "sh.dir.h"
 #include "sh.proc.h"
@@ -21,15 +23,6 @@
 /*
  * C Shell - functions that manage processes, handling hanging, termination
  */
-
-bool	neednote;
-bool	pjobs;
-static struct process *pprevious;
-static short	pmaxindex;
-static struct process proclist;
-static struct process *pcurrent;
-struct process *pcurrjob;
-static struct process *pholdjob;
 
 #define	BIGINDEX	9	/* largest desirable job index */
 
@@ -78,6 +71,7 @@ loop:
 			errno = 0;
 			goto loop;
 		}
+		pnoprocesses = pid == -1;
 		return;
 	}
 	for (pp = proclist.p_next; pp != PNULL; pp = pp->p_next)

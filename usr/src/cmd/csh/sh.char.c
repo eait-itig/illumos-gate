@@ -12,9 +12,10 @@
  * specifies the terms and conditions for redistribution.
  */
 
+#pragma ident	"%Z%%M%	%I%	%E% SMI"
+
 #include "sh.char.h"
 
-unsigned int Z;
 unsigned short _cmap[128] = {
 /*	nul		soh		stx		etx	*/
 	0,		0,		0,		0,
