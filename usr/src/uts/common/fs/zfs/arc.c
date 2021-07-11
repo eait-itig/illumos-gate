@@ -703,8 +703,8 @@ uint64_t zfs_crc64_table[256];
  * Level 2 ARC
  */
 
-#define	L2ARC_WRITE_SIZE	(8 * 1024 * 1024)	/* initial write max */
-#define	L2ARC_HEADROOM		2			/* num of writes */
+#define	L2ARC_WRITE_SIZE	(64 * 1024 * 1024)	/* initial write max */
+#define	L2ARC_HEADROOM		10			/* num of writes */
 /*
  * If we discover during ARC scan any buffers to be compressed, we boost
  * our headroom for the next scanning cycle by this percentage multiple.
@@ -732,8 +732,8 @@ uint64_t l2arc_feed_secs = L2ARC_FEED_SECS;	/* interval seconds */
 uint64_t l2arc_feed_min_ms = L2ARC_FEED_MIN_MS;	/* min interval milliseconds */
 boolean_t l2arc_noprefetch = B_TRUE;		/* don't cache prefetch bufs */
 boolean_t l2arc_feed_again = B_TRUE;		/* turbo warmup */
-boolean_t l2arc_norw = B_TRUE;			/* no reads during writes */
-int l2arc_meta_percent = 33;			/* limit on headers size */
+boolean_t l2arc_norw = B_FALSE;			/* no reads during writes */
+int l2arc_meta_percent = 40;			/* limit on headers size */
 
 /*
  * L2ARC Internals
