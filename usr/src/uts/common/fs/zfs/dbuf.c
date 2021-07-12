@@ -1117,6 +1117,7 @@ dbuf_read_impl(dmu_buf_impl_t *db, zio_t *zio, uint32_t flags,
 		if (err != 0) {
 			DB_DNODE_EXIT(db);
 			mutex_exit(&db->db_mtx);
+			dmu_buf_unlock_parent(db, dblt, tag);
 			return (err);
 		}
 
