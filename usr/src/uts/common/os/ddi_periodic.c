@@ -79,7 +79,7 @@ extern void sir_on(int);
 /*
  * Tuneables:
  */
-int ddi_periodic_max_id = 1024;
+int ddi_periodic_max_id = 131072;
 int ddi_periodic_taskq_threadcount = 4;
 hrtime_t ddi_periodic_resolution = 10000000;
 
