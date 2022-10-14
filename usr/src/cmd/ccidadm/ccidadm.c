@@ -165,11 +165,11 @@ ccidadm_list_slot_status_str(uccid_cmd_status_t *ucs, char *buf, uint_t buflen)
 	}
 
 	if (ucs->ucs_status & UCCID_STATUS_F_CARD_ACTIVE) {
-		(void) snprintf(buf, buflen, "activated");
+		(void) snprintf(buf, buflen, "active");
 		return;
 	}
 
-	(void) snprintf(buf, buflen, "unactivated");
+	(void) snprintf(buf, buflen, "inactive");
 }
 
 static boolean_t
@@ -183,7 +183,7 @@ ccidadm_list_slot_transport_str(uccid_cmd_status_t *ucs, char *buf,
 
 	switch (ucs->ucs_class.ccd_dwFeatures & bits) {
 	case 0:
-		tran = "character";
+		tran = "char";
 		break;
 	case CCID_CLASS_F_TPDU_XCHG:
 		tran = "TPDU";
@@ -193,7 +193,7 @@ ccidadm_list_slot_transport_str(uccid_cmd_status_t *ucs, char *buf,
 		tran = "APDU";
 		break;
 	default:
-		tran = "unknown";
+		tran = "????";
 		break;
 	}
 
@@ -220,21 +220,43 @@ static boolean_t
 ccidadm_list_slot_usable_str(uccid_cmd_status_t *ucs, char *buf,
     uint_t buflen)
 {
-	const char *un = "";
+	boolean_t first = B_TRUE;
 	ccid_class_features_t feat;
 	uint_t prot = CCID_CLASS_F_SHORT_APDU_XCHG | CCID_CLASS_F_EXT_APDU_XCHG;
-	uint_t param = CCID_CLASS_F_AUTO_PARAM_NEG | CCID_CLASS_F_AUTO_PPS;
+	uint_t pps = CCID_CLASS_F_AUTO_PARAM_NEG | CCID_CLASS_F_AUTO_PPS;
+	uint_t param = CCID_CLASS_F_AUTO_PARAM_NEG |
+	    CCID_CLASS_F_AUTO_PARAM_ATR;
 	uint_t clock = CCID_CLASS_F_AUTO_BAUD | CCID_CLASS_F_AUTO_ICC_CLOCK;
 
 	feat = ucs->ucs_class.ccd_dwFeatures;
 
-	if ((feat & prot) == 0 ||
-	    (feat & param) != param ||
+	if ((feat & prot) == 0 || (feat & pps) == 0 || (feat & param) == 0 ||
 	    (feat & clock) != clock) {
-		un = "un";
+		(void) strlcpy(buf, "no (", buflen);
+	} else {
+		return (strlcpy(buf, "yes", buflen) < buflen);
 	}
 
-	return (snprintf(buf, buflen, "%ssupported", un) < buflen);
+	if ((feat & prot) == 0) {
+		return (strlcat(buf, "non-APDU)", buflen) < buflen);
+	}
+	if ((feat & pps) == 0) {
+		(void) strlcat(buf, "PPS", buflen);
+		first = B_FALSE;
+	}
+	if ((feat & param) == 0) {
+		if (!first)
+			(void) strlcat(buf, ", ", buflen);
+		(void) strlcat(buf, "params", buflen);
+		first = B_FALSE;
+	}
+	if ((feat & clock) != clock) {
+		if (!first)
+			(void) strlcat(buf, ", ", buflen);
+		(void) strlcat(buf, "clock", buflen);
+		first = B_FALSE;
+	}
+	return (strlcat(buf, ")", buflen) < buflen);
 }
 
 static boolean_t
@@ -298,10 +320,10 @@ ccidadm_list_slot(int slotfd, const char *name, void *arg)
 
 static ofmt_field_t ccidadm_list_fields[] = {
 	{ "PRODUCT",	24,	CCIDADM_LIST_PRODUCT,	ccidadm_list_ofmt_cb },
-	{ "DEVICE",	16,	CCIDADM_LIST_DEVICE,	ccidadm_list_ofmt_cb },
-	{ "CARD STATE",	12,	CCIDADM_LIST_STATE,	ccidadm_list_ofmt_cb },
+	{ "DEVICE",	15,	CCIDADM_LIST_DEVICE,	ccidadm_list_ofmt_cb },
+	{ "CARD",	8,	CCIDADM_LIST_STATE,	ccidadm_list_ofmt_cb },
 	{ "TRANSPORT",	12,	CCIDADM_LIST_TRANSPORT,	ccidadm_list_ofmt_cb },
-	{ "SUPPORTED",	12,	CCIDADM_LIST_SUPPORTED,	ccidadm_list_ofmt_cb },
+	{ "SUPPORTED",	23,	CCIDADM_LIST_SUPPORTED,	ccidadm_list_ofmt_cb },
 	{ NULL,		0,	0,			NULL	}
 };
 
