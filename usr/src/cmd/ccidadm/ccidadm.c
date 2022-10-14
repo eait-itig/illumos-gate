@@ -212,20 +212,45 @@ ccidadm_list_slot_transport_str(uccid_cmd_status_t *ucs, ilstr_t *s)
 static void
 ccidadm_list_slot_usable_str(uccid_cmd_status_t *ucs, ilstr_t *s)
 {
+	boolean_t first = B_TRUE;
 	ccid_class_features_t feat;
 	uint_t prot = CCID_CLASS_F_SHORT_APDU_XCHG | CCID_CLASS_F_EXT_APDU_XCHG;
-	uint_t param = CCID_CLASS_F_AUTO_PARAM_NEG | CCID_CLASS_F_AUTO_PPS;
+	uint_t pps = CCID_CLASS_F_AUTO_PARAM_NEG | CCID_CLASS_F_AUTO_PPS;
+	uint_t param = CCID_CLASS_F_AUTO_PARAM_NEG |
+	    CCID_CLASS_F_AUTO_PARAM_ATR;
 	uint_t clock = CCID_CLASS_F_AUTO_BAUD | CCID_CLASS_F_AUTO_ICC_CLOCK;
 
 	feat = ucs->ucs_class.ccd_dwFeatures;
 
-	if ((feat & prot) == 0 ||
-	    (feat & param) != param ||
+	if ((feat & prot) == 0 || (feat & pps) == 0 || (feat & param) == 0 ||
 	    (feat & clock) != clock) {
-		ilstr_append_str(s, "un");
+		ilstr_append_str(s, "no (");
+	} else {
+		ilstr_append_str(s, "yes");
+		return;
 	}
 
-	ilstr_append_str(s, "supported");
+	if ((feat & prot) == 0) {
+		ilstr_append_str(s, "non-APDU)");
+		return;
+	}
+	if ((feat & pps) == 0) {
+		ilstr_append_str(s, "PPS");
+		first = B_FALSE;
+	}
+	if ((feat & param) == 0) {
+		if (!first)
+			ilstr_append_str(s, ", ");
+		ilstr_append_str(s, "params");
+		first = B_FALSE;
+	}
+	if ((feat & clock) != clock) {
+		if (!first)
+			ilstr_append_str(s, ", ");
+		ilstr_append_str(s, "clock");
+		first = B_FALSE;
+	}
+	ilstr_append_str(s, ")");
 }
 
 static boolean_t
@@ -285,10 +310,10 @@ ccidadm_list_slot(int slotfd, const char *name, void *arg)
 
 static ofmt_field_t ccidadm_list_fields[] = {
 	{ "PRODUCT",	24,	CCIDADM_LIST_PRODUCT,	ccidadm_list_ofmt_cb },
-	{ "DEVICE",	16,	CCIDADM_LIST_DEVICE,	ccidadm_list_ofmt_cb },
-	{ "CARD STATE",	12,	CCIDADM_LIST_STATE,	ccidadm_list_ofmt_cb },
+	{ "DEVICE",	15,	CCIDADM_LIST_DEVICE,	ccidadm_list_ofmt_cb },
+	{ "CARD",	8,	CCIDADM_LIST_STATE,	ccidadm_list_ofmt_cb },
 	{ "TRANSPORT",	12,	CCIDADM_LIST_TRANSPORT,	ccidadm_list_ofmt_cb },
-	{ "SUPPORTED",	12,	CCIDADM_LIST_SUPPORTED,	ccidadm_list_ofmt_cb },
+	{ "SUPPORTED",	23,	CCIDADM_LIST_SUPPORTED,	ccidadm_list_ofmt_cb },
 	{ NULL,		0,	0,			NULL	}
 };
 
