@@ -2898,6 +2898,10 @@ lxpr_read_pid_tid_stat(lxpr_node_t *lxpnp, lxpr_uiobuf_t *uiobuf)
 	    "%lu %lu "					/* 36-37 */
 	    "%d "					/* 38 */
 	    "%d"					/* 39 */
+	    "%u "					/* 40 */
+	    "%u "					/* 41 */
+	    "%llu "					/* 42 */
+	    "%lu %ld"					/* 43-44 */
 	    "\n",
 	    tid,					/* 1 */
 	    buf_comm, stat, ppid, pgpid, spid, psdev, psgid, /* 2-8 */
@@ -2913,7 +2917,11 @@ lxpr_read_pid_tid_stat(lxpr_node_t *lxpnp, lxpr_uiobuf_t *uiobuf)
 	    wchan,					/* 35 */
 	    0l, 0l,					/* nswap,cnswap 36-37 */
 	    exit_signal,				/* exit_signal	38 */
-	    cpu						/* 39 */);
+	    cpu,					/* 39 */
+	    0l,						/* rt_priority 40 */
+	    0l,						/* policy 41 */
+	    0ull,					/* blkio_ticks 42 */
+	    0ul, 0l					/* guest_time 43-44 */);
 }
 
 static void
