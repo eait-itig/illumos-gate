@@ -2928,6 +2928,10 @@ kmem_free(void *buf, size_t size)
 	size_t index;
 	kmem_cache_t *cp;
 
+	if (buf == NULL && size == 0)
+		return;
+	VERIFY(buf != NULL);
+
 	if ((index = (size - 1) >> KMEM_ALIGN_SHIFT) < KMEM_ALLOC_TABLE_MAX) {
 		cp = kmem_alloc_table[index];
 		/* fall through to kmem_cache_free() */
@@ -2938,9 +2942,6 @@ kmem_free(void *buf, size_t size)
 		/* fall through to kmem_cache_free() */
 
 	} else {
-		EQUIV(buf == NULL, size == 0);
-		if (buf == NULL && size == 0)
-			return;
 		vmem_free(kmem_oversize_arena, buf, size);
 		return;
 	}
