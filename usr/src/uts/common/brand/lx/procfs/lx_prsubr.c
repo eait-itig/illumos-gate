@@ -804,9 +804,14 @@ lxpr_lookup_fdnode(vnode_t *dvp, const char *name)
 	 * VNON to bypass link-following elsewhere in the vfs system.
 	 *
 	 * See lxpr_readlink for more details.
+	 *
+	 * We drop p_lock for this (but keep P_PR_LOCK), since this will do
+	 * a VOP_GETATTR that could take a while.
 	 */
+	mutex_exit(&p->p_lock);
 	if (lxpr_readlink_fdnode(lxfp, NULL, 0) == 0)
 		vp->v_type = VNON;
+	mutex_enter(&p->p_lock);
 
 	lxpr_unlock(p);
 	ASSERT(vp != NULL);
@@ -834,6 +839,7 @@ lxpr_readlink_fdnode(lxpr_node_t *lxpnp, char *bp, size_t len)
 	default:
 		return (-1);
 	}
+
 
 	/* Fetch the inode of the underlying vnode */
 	if (VOP_GETATTR(rvp, &attr, 0, CRED(), NULL) != 0)
