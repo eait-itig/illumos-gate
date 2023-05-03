@@ -319,7 +319,7 @@ static int
 sdev_open(struct vnode **vpp, int flag, struct cred *cred, caller_context_t *ct)
 {
 	struct sdev_node *dv = VTOSDEV(*vpp);
-	struct sdev_node *ddv = dv->sdev_dotdot;
+	vnode_t *avp, *oavp;
 	int error = 0;
 
 	if ((*vpp)->v_type == VDIR)
@@ -334,14 +334,25 @@ sdev_open(struct vnode **vpp, int flag, struct cred *cred, caller_context_t *ct)
 	if ((*vpp)->v_type != VREG)
 		return (ENOTSUP);
 
-	ASSERT(ddv);
-	rw_enter(&ddv->sdev_contents, RW_READER);
-	if (dv->sdev_attrvp == NULL) {
-		rw_exit(&ddv->sdev_contents);
+	rw_enter(&dv->sdev_contents, RW_READER);
+	oavp = (avp = dv->sdev_attrvp);
+	if (avp != NULL)
+		VN_HOLD(avp);
+	rw_exit(&dv->sdev_contents);
+
+	if (avp == NULL)
 		return (ENOENT);
-	}
-	error = VOP_OPEN(&(dv->sdev_attrvp), flag, cred, ct);
-	rw_exit(&ddv->sdev_contents);
+	error = VOP_OPEN(&avp, flag, cred, ct);
+	/*
+	 * We only keep one attrvp per sdev vnode, so if we've opened a cloning
+	 * device or something similar, that's bad and will not behave itself
+	 * well (everyone will get the same clone etc).
+	 *
+	 * XXX: should we try to return an error instead of blowing up?
+	 */
+	if (!error)
+		VERIFY(oavp == avp);
+	VN_RELE(avp);
 	return (error);
 }
 
@@ -351,6 +362,8 @@ sdev_close(struct vnode *vp, int flag, int count,
     offset_t offset, struct cred *cred, caller_context_t *ct)
 {
 	struct sdev_node *dv = VTOSDEV(vp);
+	int error;
+	vnode_t *avp;
 
 	if (vp->v_type == VDIR) {
 		cleanlocks(vp, ttoproc(curthread)->p_pid, 0);
@@ -365,8 +378,16 @@ sdev_close(struct vnode *vp, int flag, int count,
 	if (vp->v_type != VREG)
 		return (ENOTSUP);
 
-	ASSERT(dv->sdev_attrvp);
-	return (VOP_CLOSE(dv->sdev_attrvp, flag, count, offset, cred, ct));
+	rw_enter(&dv->sdev_contents, RW_READER);
+	avp = dv->sdev_attrvp;
+	ASSERT(avp);
+	VN_HOLD(avp);
+	rw_exit(&dv->sdev_contents);
+
+	error = VOP_CLOSE(avp, flag, count, offset, cred, ct);
+	VN_RELE(avp);
+
+	return (error);
 }
 
 /*ARGSUSED*/
@@ -433,6 +454,8 @@ sdev_ioctl(struct vnode *vp, int cmd, intptr_t arg, int flag,
     struct cred *cred, int *rvalp,  caller_context_t *ct)
 {
 	struct sdev_node *dv = VTOSDEV(vp);
+	int error;
+	vnode_t *avp;
 
 	if (!SDEV_IS_GLOBAL(dv) || (vp->v_type == VDIR))
 		return (ENOTTY);
@@ -441,8 +464,15 @@ sdev_ioctl(struct vnode *vp, int cmd, intptr_t arg, int flag,
 	if (vp->v_type != VREG)
 		return (EINVAL);
 
-	ASSERT(dv->sdev_attrvp);
-	return (VOP_IOCTL(dv->sdev_attrvp, cmd, arg, flag, cred, rvalp, ct));
+	rw_enter(&dv->sdev_contents, RW_READER);
+	avp = dv->sdev_attrvp;
+	ASSERT(avp);
+	VN_HOLD(avp);
+	rw_exit(&dv->sdev_contents);
+
+	error = VOP_IOCTL(avp, cmd, arg, flag, cred, rvalp, ct);
+	VN_RELE(avp);
+	return (error);
 }
 
 static int
@@ -451,11 +481,9 @@ sdev_getattr(struct vnode *vp, struct vattr *vap, int flags,
 {
 	int			error = 0;
 	struct sdev_node	*dv = VTOSDEV(vp);
-	struct sdev_node	*parent = dv->sdev_dotdot;
+	vnode_t			*avp;
 
-	ASSERT(parent);
-
-	rw_enter(&parent->sdev_contents, RW_READER);
+	rw_enter(&dv->sdev_contents, RW_READER);
 	ASSERT(dv->sdev_attr || dv->sdev_attrvp);
 
 	/*
@@ -463,15 +491,17 @@ sdev_getattr(struct vnode *vp, struct vattr *vap, int flags,
 	 * 	- for persistent nodes (SDEV_PERSIST): backstore
 	 *	- for non-persistent nodes: module ops if global, then memory
 	 */
-	if (dv->sdev_attrvp) {
-		rw_exit(&parent->sdev_contents);
-		error = VOP_GETATTR(dv->sdev_attrvp, vap, flags, cr, ct);
+	if ((avp = dv->sdev_attrvp)) {
+		VN_HOLD(avp);
+		rw_exit(&dv->sdev_contents);
+		error = VOP_GETATTR(avp, vap, flags, cr, ct);
+		VN_RELE(avp);
 		sdev_vattr_merge(dv, vap);
 	} else {
 		ASSERT(dv->sdev_attr);
 		*vap = *dv->sdev_attr;
 		sdev_vattr_merge(dv, vap);
-		rw_exit(&parent->sdev_contents);
+		rw_exit(&dv->sdev_contents);
 	}
 
 	return (error);
@@ -491,9 +521,11 @@ sdev_getsecattr(struct vnode *vp, struct vsecattr *vsap, int flags,
 {
 	int	error;
 	struct sdev_node *dv = VTOSDEV(vp);
-	struct vnode *avp = dv->sdev_attrvp;
+	struct vnode *avp;
 
-	if (avp == NULL) {
+	ASSERT(RW_LOCK_HELD(&dv->sdev_contents));
+
+	if ((avp = dv->sdev_attrvp) == NULL) {
 		/* return fs_fab_acl() if flavor matches, else do nothing */
 		if ((SDEV_ACL_FLAVOR(vp) == _ACL_ACLENT_ENABLED &&
 		    (vsap->vsa_mask & (VSA_ACLCNT | VSA_DFACLCNT))) ||
@@ -516,12 +548,14 @@ sdev_setsecattr(struct vnode *vp, struct vsecattr *vsap, int flags,
 {
 	int	error;
 	struct sdev_node *dv = VTOSDEV(vp);
-	struct vnode *avp = dv->sdev_attrvp;
+	struct vnode *avp;
+
+	ASSERT(RW_WRITE_HELD(&dv->sdev_contents));
 
 	if (dv->sdev_state == SDEV_ZOMBIE)
 		return (0);
 
-	if (avp == NULL) {
+	if ((avp = dv->sdev_attrvp) == NULL) {
 		if (SDEV_IS_GLOBAL(dv) && !SDEV_IS_PERSIST(dv))
 			return (fs_nosys());
 		ASSERT(dv->sdev_attr);
@@ -581,12 +615,17 @@ sdev_self_access(sdev_node_t *dv, int mode, int flags, struct cred *cr,
     caller_context_t *ct)
 {
 	int ret;
+	vnode_t *avp;
 
 	ASSERT(RW_READ_HELD(&dv->sdev_contents));
 	ASSERT(dv->sdev_attr || dv->sdev_attrvp);
 
-	if (dv->sdev_attrvp) {
-		ret = VOP_ACCESS(dv->sdev_attrvp, mode, flags, cr, ct);
+	if ((avp = dv->sdev_attrvp)) {
+		VN_HOLD(avp);
+		rw_exit(&dv->sdev_contents);
+		ret = VOP_ACCESS(avp, mode, flags, cr, ct);
+		VN_RELE(avp);
+		rw_enter(&dv->sdev_contents, RW_READER);
 	} else if (dv->sdev_attr) {
 		ret = sdev_unlocked_access(dv, mode, cr);
 		if (ret)
@@ -795,7 +834,7 @@ sdev_remove(struct vnode *dvp, char *nm, struct cred *cred,
 {
 	int	error;
 	struct sdev_node *parent = (struct sdev_node *)VTOSDEV(dvp);
-	struct vnode *vp = NULL;
+	struct vnode *vp = NULL, *avp;
 	struct sdev_node *dv = NULL;
 	int len;
 	int bkstore;
@@ -872,15 +911,20 @@ sdev_remove(struct vnode *dvp, char *nm, struct cred *cred,
 	 */
 	sdev_cache_update(parent, &dv, nm, SDEV_CACHE_DELETE);
 	VN_RELE(vp);
+
+	if (bkstore) {
+		avp = parent->sdev_attrvp;
+		VN_HOLD(avp);
+	}
 	rw_exit(&parent->sdev_contents);
 
 	/*
 	 * best efforts clean up the backing store
 	 */
 	if (bkstore) {
-		ASSERT(parent->sdev_attrvp);
-		error = VOP_REMOVE(parent->sdev_attrvp, nm, cred,
-		    ct, flags);
+		ASSERT(avp);
+		error = VOP_REMOVE(avp, nm, cred, ct, flags);
+		VN_RELE(avp);
 		/*
 		 * do not report BUSY error
 		 * because the backing store ref count is released
@@ -918,7 +962,7 @@ sdev_rename(struct vnode *odvp, char *onm, struct vnode *ndvp, char *nnm,
 	struct sdev_node	*todv = NULL;	/* destination node */
 	struct vnode 		*nvp = NULL;	/* destination vnode */
 	int			samedir = 0;	/* set if odvp == ndvp */
-	struct vnode		*realvp;
+	struct vnode		*realvp, *avp;
 	int error = 0;
 	dev_t fsid;
 	int bkstore = 0;
@@ -1123,18 +1167,25 @@ sdev_rename(struct vnode *odvp, char *onm, struct vnode *ndvp, char *nnm,
 	    SDEV_CACHE_DELETE);
 	VN_RELE(SDEVTOV(fromdv));
 
+	if (bkstore) {
+		avp = fromparent->sdev_attrvp;
+		VN_HOLD(avp);
+	}
+
+	rw_exit(&fromparent->sdev_contents);
+	mutex_exit(&sdev_lock);
+
 	/* best effforts clean up the backing store */
 	if (bkstore) {
-		ASSERT(fromparent->sdev_attrvp);
+		ASSERT(avp);
 		if (type != VDIR) {
 /* XXXci - We may need to translate the C-I flags on VOP_REMOVE */
-			error = VOP_REMOVE(fromparent->sdev_attrvp,
-			    onm, kcred, ct, 0);
+			error = VOP_REMOVE(avp, onm, kcred, ct, 0);
 		} else {
 /* XXXci - We may need to translate the C-I flags on VOP_RMDIR */
-			error = VOP_RMDIR(fromparent->sdev_attrvp,
-			    onm, fromparent->sdev_attrvp, kcred, ct, 0);
+			error = VOP_RMDIR(avp, onm, avp, kcred, ct, 0);
 		}
+		VN_RELE(avp);
 
 		if (error) {
 			sdcmn_err2(("sdev_rename: device %s is "
@@ -1143,8 +1194,6 @@ sdev_rename(struct vnode *odvp, char *onm, struct vnode *ndvp, char *nnm,
 			error = 0;
 		}
 	}
-	rw_exit(&fromparent->sdev_contents);
-	mutex_exit(&sdev_lock);
 
 	/* once reached to this point, the rename is regarded successful */
 	return (0);
@@ -1315,7 +1364,7 @@ sdev_rmdir(struct vnode *dvp, char *nm, struct vnode *cdir, struct cred *cred,
 	int error = 0;
 	struct sdev_node *parent = (struct sdev_node *)VTOSDEV(dvp);
 	struct sdev_node *self = NULL;
-	struct vnode *vp = NULL;
+	struct vnode *vp = NULL, *avp;
 
 	/* bail out early */
 	if (strcmp(nm, ".") == 0)
@@ -1392,15 +1441,20 @@ sdev_rmdir(struct vnode *dvp, char *nm, struct vnode *cdir, struct cred *cred,
 
 	/* unlink it from the directory cache */
 	sdev_cache_update(parent, &self, nm, SDEV_CACHE_DELETE);
+	avp = NULL;
+	if (SDEV_IS_PERSIST(parent)) {
+		avp = parent->sdev_attrvp;
+		ASSERT(avp);
+		VN_HOLD(avp);
+	}
 	rw_exit(&parent->sdev_contents);
 	vn_vfsunlock(vp);
 	VN_RELE(vp);
 
 	/* best effort to clean up the backing store */
-	if (SDEV_IS_PERSIST(parent)) {
-		ASSERT(parent->sdev_attrvp);
-		error = VOP_RMDIR(parent->sdev_attrvp, nm,
-		    parent->sdev_attrvp, kcred, ct, flags);
+	if (avp != NULL) {
+		error = VOP_RMDIR(avp, nm, avp, kcred, ct, flags);
+		VN_RELE(avp);
 
 		if (error)
 			sdcmn_err2(("sdev_rmdir: cleaning device %s is on"
@@ -1424,18 +1478,24 @@ sdev_readlink(struct vnode *vp, struct uio *uiop, struct cred *cred,
     caller_context_t *ct)
 {
 	struct sdev_node *dv;
+	vnode_t *avp;
 	int	error = 0;
 
 	ASSERT(vp->v_type == VLNK);
 
 	dv = VTOSDEV(vp);
 
-	if (dv->sdev_attrvp) {
+	rw_enter(&dv->sdev_contents, RW_READER);
+
+	if ((avp = dv->sdev_attrvp)) {
 		/* non-NULL attrvp implys a persisted node at READY state */
-		return (VOP_READLINK(dv->sdev_attrvp, uiop, cred, ct));
+		VN_HOLD(avp);
+		rw_exit(&dv->sdev_contents);
+		error = VOP_READLINK(avp, uiop, cred, ct);
+		VN_RELE(avp);
+		return (error);
 	} else if (dv->sdev_symlink != NULL) {
 		/* memory nodes, e.g. local nodes */
-		rw_enter(&dv->sdev_contents, RW_READER);
 		sdcmn_err2(("sdev_readlink link is %s\n", dv->sdev_symlink));
 		error = uiomove(dv->sdev_symlink, strlen(dv->sdev_symlink),
 		    UIO_READ, uiop);
@@ -1522,7 +1582,9 @@ static int
 sdev_seek(struct vnode *vp, offset_t ooff, offset_t *noffp,
     caller_context_t *ct)
 {
-	struct vnode *attrvp = VTOSDEV(vp)->sdev_attrvp;
+	struct sdev_node *dv = VTOSDEV(vp);
+	int error;
+	vnode_t *avp;
 
 	ASSERT(vp->v_type != VCHR &&
 	    vp->v_type != VBLK && vp->v_type != VLNK);
@@ -1530,8 +1592,16 @@ sdev_seek(struct vnode *vp, offset_t ooff, offset_t *noffp,
 	if (vp->v_type == VDIR)
 		return (fs_seek(vp, ooff, noffp, ct));
 
-	ASSERT(attrvp);
-	return (VOP_SEEK(attrvp, ooff, noffp, ct));
+	rw_enter(&dv->sdev_contents, RW_READER);
+	avp = dv->sdev_attrvp;
+	ASSERT(avp);
+	VN_HOLD(avp);
+	rw_exit(&dv->sdev_contents);
+
+	error = VOP_SEEK(avp, ooff, noffp, ct);
+	VN_RELE(avp);
+
+	return (error);
 }
 
 /*ARGSUSED1*/
@@ -1542,11 +1612,19 @@ sdev_frlock(struct vnode *vp, int cmd, struct flock64 *bfp, int flag,
 {
 	int error;
 	struct sdev_node *dv = VTOSDEV(vp);
+	vnode_t *avp;
 
 	ASSERT(dv);
-	ASSERT(dv->sdev_attrvp);
-	error = VOP_FRLOCK(dv->sdev_attrvp, cmd, bfp, flag, offset,
-	    flk_cbp, cr, ct);
+
+	rw_enter(&dv->sdev_contents, RW_READER);
+	avp = dv->sdev_attrvp;
+	ASSERT(avp);
+	VN_HOLD(avp);
+	rw_exit(&dv->sdev_contents);
+
+	error = VOP_FRLOCK(avp, cmd, bfp, flag, offset, flk_cbp, cr, ct);
+
+	VN_RELE(avp);
 
 	return (error);
 }
