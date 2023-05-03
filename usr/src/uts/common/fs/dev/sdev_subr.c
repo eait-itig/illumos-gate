@@ -2826,6 +2826,7 @@ devname_setattr_func(struct vnode *vp, struct vattr *vap, int flags,
 	struct sdev_node	*dv = VTOSDEV(vp);
 	struct sdev_node	*parent = dv->sdev_dotdot;
 	struct vattr		*get;
+	vnode_t			*avp;
 	uint_t			mask = vap->va_mask;
 	int 			error;
 
@@ -2847,10 +2848,30 @@ devname_setattr_func(struct vnode *vp, struct vattr *vap, int flags,
 		return (0);
 	}
 
+	rw_enter(&dv->sdev_contents, RW_READER);
+
 	/* If backing store exists, just set it. */
-	if (dv->sdev_attrvp) {
+	if ((avp = dv->sdev_attrvp)) {
+		VN_HOLD(avp);
+		rw_exit(&dv->sdev_contents);
 		rw_exit(&parent->sdev_contents);
-		return (VOP_SETATTR(dv->sdev_attrvp, vap, flags, cred, NULL));
+		error = VOP_SETATTR(avp, vap, flags, cred, NULL);
+		VN_RELE(avp);
+		return (error);
+	}
+
+	if (!rw_tryupgrade(&dv->sdev_contents)) {
+		rw_exit(&dv->sdev_contents);
+		rw_enter(&dv->sdev_contents, RW_WRITER);
+		/* We dropped the lock, re-check attrvp now */
+		if ((avp = dv->sdev_attrvp)) {
+			VN_HOLD(avp);
+			rw_exit(&dv->sdev_contents);
+			rw_exit(&parent->sdev_contents);
+			error = VOP_SETATTR(avp, vap, flags, cred, NULL);
+			VN_RELE(avp);
+			return (error);
+		}
 	}
 
 	/*
@@ -2860,21 +2881,25 @@ devname_setattr_func(struct vnode *vp, struct vattr *vap, int flags,
 	if (SDEV_IS_PERSIST(dv) ||
 	    ((vap->va_mask & ~AT_TIMES) != 0 && !SDEV_IS_DYNAMIC(dv))) {
 		sdev_vattr_merge(dv, vap);
-		rw_enter(&dv->sdev_contents, RW_WRITER);
 		error = sdev_shadow_node(dv, cred);
+		if (!error) {
+			avp = dv->sdev_attrvp;
+			VN_HOLD(avp);
+		}
 		rw_exit(&dv->sdev_contents);
 		rw_exit(&parent->sdev_contents);
 
 		if (error)
 			return (error);
-		return (VOP_SETATTR(dv->sdev_attrvp, vap, flags, cred, NULL));
+		error = VOP_SETATTR(avp, vap, flags, cred, NULL);
+		VN_RELE(avp);
+		return (error);
 	}
 
 
 	/*
 	 * sdev_attr was allocated in sdev_mknode
 	 */
-	rw_enter(&dv->sdev_contents, RW_WRITER);
 	error = secpolicy_vnode_setattr(cred, vp, vap,
 	    dv->sdev_attr, flags, sdev_unlocked_access, dv);
 	if (error) {
