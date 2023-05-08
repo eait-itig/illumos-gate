@@ -133,6 +133,16 @@ struct fem_arg {
 struct fem_list {
 	uint_t	feml_refc;	/* reference count */
 	int	feml_tos;	/* top of stack pointer(index) */
+	/*
+	 * NOTE: to read feml_tos, you must hold the femh_lock in the fem_head.
+	 * If you did fem_addref, then you can safely drop the lock after you've
+	 * read feml_tos (and go on to use the feml_nodes[]).
+	 *
+	 * The fem_list will never be shortened/removed from after creation (it
+	 * will be copied instead), but it CAN be added to, and femh_lock protects
+	 * feml_tos against partial increment (or increment before the new
+	 * feml_nodes[] entry is fully written).
+	 */
 	int	feml_ssize;	/* stack size */
 	int	feml_pad;	/* alignment */
 	struct fem_node feml_nodes[1]; /* variable bounds */
