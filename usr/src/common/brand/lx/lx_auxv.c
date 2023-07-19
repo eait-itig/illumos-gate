@@ -61,7 +61,9 @@ lx_auxv_stol(const auxv_t *ap, auxv_t *oap, const lx_elf_data_t *edp)
 			loap->la_val = 1;
 			return (0);
 		} else {
-			return (1);
+			loap->la_type = AT_SECURE;
+			loap->la_val = 0;
+			return (0);
 		}
 	case AT_SUN_GID:
 		loap->la_type = AT_LX_EGID;
