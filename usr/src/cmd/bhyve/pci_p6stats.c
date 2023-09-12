@@ -190,8 +190,7 @@ pci_p6stats_worker(void *arg)
 		membar_producer();
 
 		pthread_mutex_lock(&sc->dsc_mtx);
-		if (pci_msi_enabled(sc->dsc_pi))
-			pci_generate_msi(sc->dsc_pi, 0);
+		pci_generate_msix(sc->dsc_pi, 0);
 	}
 
 
@@ -218,10 +217,11 @@ pci_p6stats_init(struct vmctx *ctx, struct pci_devinst *pi, nvlist_t *nvl)
 	pci_set_cfgdata8(pi, PCIR_CLASS, PCIC_SIMPLECOMM);
 	pci_set_cfgdata8(pi, PCIR_SUBCLASS, PCIS_SIMPLECOMM_OTHER);
 
-	pci_emul_add_msicap(pi, 1);
-
 	pci_emul_alloc_bar(pi, 0, PCIBAR_MEM64,
 	    sizeof (struct pci_p6stats_bar));
+
+	pci_emul_add_msixcap(pi, 1, 2);
+	pci_emul_add_pciecap(pi, PCIEM_TYPE_ROOT_INT_EP);
 
 	return (0);
 }
@@ -237,6 +237,12 @@ pci_p6stats_write(struct vmctx *ctx, int vcpu, struct pci_devinst *pi,
     int baridx, uint64_t offset, int size, uint64_t value)
 {
 	struct pci_p6stats_softc *sc = pi->pi_arg;
+
+	if (baridx == pci_msix_table_bar(pi) ||
+	    baridx == pci_msix_pba_bar(pi)) {
+		pci_emul_msix_twrite(pi, offset, size, value);
+		return;
+	}
 
 	assert(baridx == 0);
 	if (offset >= sizeof (struct pci_p6stats_bar))
@@ -321,6 +327,11 @@ pci_p6stats_read(struct vmctx *ctx, int vcpu, struct pci_devinst *pi, int baridx
 {
 	struct pci_p6stats_softc *sc = pi->pi_arg;
 	uint64_t value = 0;
+
+	if (baridx == pci_msix_table_bar(pi) ||
+	    baridx == pci_msix_pba_bar(pi)) {
+		return (pci_emul_msix_tread(pi, offset, size));
+	}
 
 	assert(baridx == 0);
 
