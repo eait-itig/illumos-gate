@@ -65,6 +65,7 @@ SRCS =	acpi.c			\
 	pci_xhci.c		\
 	pci_p4sum.c		\
 	pci_p6stats.c		\
+	pci_a2.c		\
 	pctestdev.c		\
 	pm.c			\
 	post.c			\
