@@ -132,8 +132,8 @@ uint32_t mac_tx_srs_hiwat = 1000;
  * rings is based on specified bandwidth, CPU speed and number of CPUs in
  * the system.
  */
-uint_t mac_rx_soft_ring_count = 2;
-uint_t mac_rx_soft_ring_10gig_count = 2;
+uint_t mac_rx_soft_ring_count = 8;
+uint_t mac_rx_soft_ring_10gig_count = 8;
 
 /*
  * Every Tx and Rx mac_soft_ring_set_t (mac_srs) created gets added
