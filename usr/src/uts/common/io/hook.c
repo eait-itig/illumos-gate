@@ -37,6 +37,8 @@
 #include <sys/sdt.h>
 #include <sys/cmn_err.h>
 
+#include <sys/stddef.h>
+
 /*
  * This file provides kernel hook framework.
  */
@@ -221,20 +223,20 @@ static void hook_fini(void);
 static void *hook_stack_init(netstackid_t stackid, netstack_t *ns);
 static void hook_stack_fini(netstackid_t stackid, void *arg);
 static void hook_stack_shutdown(netstackid_t stackid, void *arg);
-static int hook_insert(hook_int_head_t *head, hook_int_t *new);
-static void hook_insert_plain(hook_int_head_t *head, hook_int_t *new);
-static int hook_insert_afterbefore(hook_int_head_t *head, hook_int_t *new);
-static hook_int_t *hook_find_byname(hook_int_head_t *head, char *name);
+static int hook_insert(list_t *head, hook_int_t *new);
+static void hook_insert_plain(list_t *head, hook_int_t *new);
+static int hook_insert_afterbefore(list_t *head, hook_int_t *new);
+static hook_int_t *hook_find_byname(list_t *head, char *name);
 static void hook_event_init_kstats(hook_family_int_t *, hook_event_int_t *);
 static void hook_event_notify_run(hook_event_int_t *, hook_family_int_t *,
     char *event, char *name, hook_notify_cmd_t cmd);
 static void hook_init_kstats(hook_family_int_t *hfi, hook_event_int_t *hei,
     hook_int_t *hi);
-static int hook_notify_register(hook_notify_head_t *head,
+static int hook_notify_register(list_t *head,
     hook_notify_fn_t callback, void *arg);
-static int hook_notify_unregister(hook_notify_head_t *head,
+static int hook_notify_unregister(list_t *head,
     hook_notify_fn_t callback, void **);
-static void hook_notify_run(hook_notify_head_t *head, char *family,
+static void hook_notify_run(list_t *head, char *family,
     char *event, char *name, hook_notify_cmd_t cmd);
 static void hook_stack_notify_run(hook_stack_t *hks, char *name,
     hook_notify_cmd_t cmd);
@@ -247,7 +249,7 @@ static void hook_stack_remove(hook_stack_t *hks);
  * the netstack functions for this work but they will return NULL
  * until the zone has been fully initialised.
  */
-static hook_stack_head_t hook_stacks;
+static list_t hook_stacks;
 static kmutex_t hook_stack_lock;
 
 /*
@@ -295,7 +297,8 @@ static void
 hook_init(void)
 {
 	mutex_init(&hook_stack_lock, NULL, MUTEX_DRIVER, NULL);
-	SLIST_INIT(&hook_stacks);
+	list_create(&hook_stacks, sizeof (hook_stack_t),
+	    offsetof(hook_stack_t, hks_node));
 
 	/*
 	 * We want to be informed each time a stack is created or
@@ -318,7 +321,7 @@ hook_fini(void)
 	netstack_unregister(NS_HOOK);
 
 	mutex_destroy(&hook_stack_lock);
-	ASSERT(SLIST_EMPTY(&hook_stacks));
+	ASSERT(list_is_empty(&hook_stacks));
 }
 
 /*
@@ -371,7 +374,7 @@ hook_wait_setflag(flagwait_t *waiter, uint32_t busyset, fwflag_t wanted,
 		wantedset = ((waiter->fw_flags & wanted) == wanted);
 		if (!wantedset)
 			waiter->fw_flags |= wanted;
-		CVW_EXIT_WRITE(waiter->fw_owner);
+		rw_exit(waiter->fw_owner);
 		cv_wait(&waiter->fw_cv, &waiter->fw_lock);
 		/*
 		 * This lock needs to be dropped here to preserve the order
@@ -380,7 +383,7 @@ hook_wait_setflag(flagwait_t *waiter, uint32_t busyset, fwflag_t wanted,
 		 */
 		mutex_exit(&waiter->fw_lock);
 		waited = 1;
-		CVW_ENTER_WRITE(waiter->fw_owner);
+		rw_enter(waiter->fw_owner, RW_WRITER);
 		mutex_enter(&waiter->fw_lock);
 		if (!wantedset)
 			waiter->fw_flags &= ~wanted;
@@ -439,9 +442,9 @@ hook_wait_destroy(flagwait_t *waiter)
 	}
 	waiter->fw_flags |= FWF_DESTROY_WANTED;
 	while (!FWF_DESTROY_OK(waiter)) {
-		CVW_EXIT_WRITE(waiter->fw_owner);
+		rw_exit(waiter->fw_owner);
 		cv_wait(&waiter->fw_cv, &waiter->fw_lock);
-		CVW_ENTER_WRITE(waiter->fw_owner);
+		rw_enter(waiter->fw_owner, RW_WRITER);
 	}
 	/*
 	 * There should now be nothing else using "waiter" or its
@@ -467,7 +470,7 @@ hook_wait_destroy(flagwait_t *waiter)
  * next layer out, which is likely to be held in an exclusive manner.
  */
 void
-hook_wait_init(flagwait_t *waiter, cvwaitlock_t *owner)
+hook_wait_init(flagwait_t *waiter, krwlock_t *owner)
 {
 	cv_init(&waiter->fw_cv, NULL, CV_DRIVER, NULL);
 	mutex_init(&waiter->fw_lock, NULL, MUTEX_DRIVER, NULL);
@@ -490,6 +493,7 @@ static void *
 hook_stack_init(netstackid_t stackid, netstack_t *ns)
 {
 	hook_stack_t	*hks;
+	char namebuf[16];
 
 #ifdef NS_DEBUG
 	printf("hook_stack_init(stack %d)\n", stackid);
@@ -499,14 +503,17 @@ hook_stack_init(netstackid_t stackid, netstack_t *ns)
 	hks->hks_netstack = ns;
 	hks->hks_netstackid = stackid;
 
-	CVW_INIT(&hks->hks_lock);
-	TAILQ_INIT(&hks->hks_nhead);
-	SLIST_INIT(&hks->hks_familylist);
+	(void) snprintf(namebuf, sizeof (namebuf), "hks_lock_%d", stackid);
+	rw_init(&hks->hks_lock, namebuf, RW_DRIVER, NULL);
+	list_create(&hks->hks_nhead, sizeof (hook_notify_t),
+	    offsetof(hook_notify_t, hn_node));
+	list_create(&hks->hks_familylist, sizeof (hook_family_int_t),
+	    offsetof(hook_family_int_t, hfi_node));
 
 	hook_wait_init(&hks->hks_waiter, &hks->hks_lock);
 
 	mutex_enter(&hook_stack_lock);
-	SLIST_INSERT_HEAD(&hook_stacks, hks, hks_entry);
+	list_insert_head(&hook_stacks, hks);
 	mutex_exit(&hook_stack_lock);
 
 	return (hks);
@@ -587,14 +594,14 @@ hook_stack_remove(hook_stack_t *hks)
 	/*
 	 * Is the structure still in use?
 	 */
-	if (!SLIST_EMPTY(&hks->hks_familylist) ||
-	    !TAILQ_EMPTY(&hks->hks_nhead))
+	if (!list_is_empty(&hks->hks_familylist) ||
+	    !list_is_empty(&hks->hks_nhead))
 		return;
 
-	SLIST_REMOVE(&hook_stacks, hks, hook_stack, hks_entry);
+	list_remove(&hook_stacks, hks);
 
 	VERIFY(hook_wait_destroy(&hks->hks_waiter) == 0);
-	CVW_DESTROY(&hks->hks_lock);
+	rw_destroy(&hks->hks_lock);
 	kmem_free(hks, sizeof (*hks));
 }
 
@@ -612,7 +619,8 @@ hook_stack_get(netstackid_t stackid)
 {
 	hook_stack_t *hks;
 
-	SLIST_FOREACH(hks, &hook_stacks, hks_entry) {
+	hks = list_head(&hook_stacks);
+	for (; hks != NULL; hks = list_next(&hook_stacks, hks)) {
 		if (hks->hks_netstackid == stackid)
 			break;
 	}
@@ -654,13 +662,13 @@ hook_stack_notify_register(netstackid_t stackid, hook_notify_fn_t callback,
 		if (hks->hks_shutdown != 0) {
 			error = ESHUTDOWN;
 		} else {
-			CVW_ENTER_WRITE(&hks->hks_lock);
+			rw_enter(&hks->hks_lock, RW_WRITER);
 			canrun = (hook_wait_setflag(&hks->hks_waiter,
 			    FWF_ADD_WAIT_MASK, FWF_ADD_WANTED,
 			    FWF_ADD_ACTIVE) != -1);
 			error = hook_notify_register(&hks->hks_nhead,
 			    callback, arg);
-			CVW_EXIT_WRITE(&hks->hks_lock);
+			rw_exit(&hks->hks_lock);
 		}
 	} else {
 		error = ESRCH;
@@ -676,7 +684,9 @@ hook_stack_notify_register(netstackid_t stackid, hook_notify_fn_t callback,
 		(void) snprintf(buffer, sizeof (buffer), "%u",
 		    hks->hks_netstackid);
 
-		SLIST_FOREACH(hfi, &hks->hks_familylist, hfi_entry) {
+
+		for (hfi = list_head(&hks->hks_familylist); hfi != NULL;
+		    hfi = list_next(&hks->hks_familylist, hfi)) {
 			if (hfi->hfi_condemned || hfi->hfi_shutdown)
 				continue;
 			callback(HN_REGISTER, arg, buffer, NULL,
@@ -718,7 +728,7 @@ hook_stack_notify_unregister(netstackid_t stackid, hook_notify_fn_t callback)
 		return (ESRCH);
 	}
 
-	CVW_ENTER_WRITE(&hks->hks_lock);
+	rw_enter(&hks->hks_lock, RW_WRITER);
 	/*
 	 * If hook_wait_setflag returns -1, another thread has flagged that it
 	 * is attempting to destroy this hook stack.  Before it can flag that
@@ -729,14 +739,14 @@ hook_stack_notify_unregister(netstackid_t stackid, hook_notify_fn_t callback)
 	 */
 	if (hook_wait_setflag(&hks->hks_waiter, FWF_DEL_WAIT_MASK,
 	    FWF_DEL_WANTED, FWF_DEL_ACTIVE) == -1) {
-		VERIFY(TAILQ_EMPTY(&hks->hks_nhead));
-		CVW_EXIT_WRITE(&hks->hks_lock);
+		VERIFY(list_is_empty(&hks->hks_nhead));
+		rw_exit(&hks->hks_lock);
 		mutex_exit(&hook_stack_lock);
 		return (ESRCH);
 	}
 
 	error = hook_notify_unregister(&hks->hks_nhead, callback, &arg);
-	CVW_EXIT_WRITE(&hks->hks_lock);
+	rw_exit(&hks->hks_lock);
 	mutex_exit(&hook_stack_lock);
 
 	if (error == 0) {
@@ -748,7 +758,8 @@ hook_stack_notify_unregister(netstackid_t stackid, hook_notify_fn_t callback)
 		(void) snprintf(buffer, sizeof (buffer), "%u",
 		    hks->hks_netstackid);
 
-		SLIST_FOREACH(hfi, &hks->hks_familylist, hfi_entry) {
+		for (hfi = list_head(&hks->hks_familylist); hfi != NULL;
+		    hfi = list_next(&hks->hks_familylist, hfi)) {
 			callback(HN_UNREGISTER, arg, buffer, NULL,
 			    hfi->hfi_family.hf_name);
 		}
@@ -829,9 +840,10 @@ hook_run(hook_family_int_t *hfi, hook_event_token_t token, hook_data_t info)
 	 * If we consider that this function is only called from within the
 	 * stack while an instance is currently active,
 	 */
-	CVW_ENTER_READ(&hfi->hfi_lock);
+	rw_enter(&hfi->hfi_lock, RW_READER_STARVEWRITER);
 
-	TAILQ_FOREACH(hi, &hei->hei_head, hi_entry) {
+	hi = list_head(&hei->hei_head);
+	for (; hi != NULL; hi = list_next(&hei->hei_head, hi)) {
 		ASSERT(hi->hi_hook.h_func != NULL);
 		DTRACE_PROBE3(hook__func__start,
 		    hook_event_token_t, token,
@@ -850,7 +862,7 @@ hook_run(hook_family_int_t *hfi, hook_event_token_t token, hook_data_t info)
 
 	hei->hei_kstats.events.value.ui64++;
 
-	CVW_EXIT_READ(&hfi->hfi_lock);
+	rw_exit(&hfi->hfi_lock);
 
 	DTRACE_PROBE3(hook__run__end,
 	    hook_event_token_t, token,
@@ -891,10 +903,10 @@ hook_family_add(hook_family_t *hf, hook_stack_t *hks, void **store)
 		return (NULL);
 
 	mutex_enter(&hook_stack_lock);
-	CVW_ENTER_WRITE(&hks->hks_lock);
+	rw_enter(&hks->hks_lock, RW_WRITER);
 
 	if (hks->hks_shutdown != 0) {
-		CVW_EXIT_WRITE(&hks->hks_lock);
+		rw_exit(&hks->hks_lock);
 		mutex_exit(&hook_stack_lock);
 		hook_family_free(new, NULL);
 		return (NULL);
@@ -903,7 +915,7 @@ hook_family_add(hook_family_t *hf, hook_stack_t *hks, void **store)
 	/* search family list */
 	hfi = hook_family_find(hf->hf_name, hks);
 	if (hfi != NULL) {
-		CVW_EXIT_WRITE(&hks->hks_lock);
+		rw_exit(&hks->hks_lock);
 		mutex_exit(&hook_stack_lock);
 		hook_family_free(new, NULL);
 		return (NULL);
@@ -916,15 +928,17 @@ hook_family_add(hook_family_t *hf, hook_stack_t *hks, void **store)
 	 */
 	if (hook_wait_setflag(&hks->hks_waiter, FWF_ADD_WAIT_MASK,
 	    FWF_ADD_WANTED, FWF_ADD_ACTIVE) == -1) {
-		CVW_EXIT_WRITE(&hks->hks_lock);
+		rw_exit(&hks->hks_lock);
 		mutex_exit(&hook_stack_lock);
 		hook_family_free(new, NULL);
 		return (NULL);
 	}
 
-	CVW_INIT(&new->hfi_lock);
-	SLIST_INIT(&new->hfi_head);
-	TAILQ_INIT(&new->hfi_nhead);
+	rw_init(&new->hfi_lock, "hfi_lock", RW_DRIVER, NULL);
+	list_create(&new->hfi_head, sizeof (hook_event_int_t),
+	    offsetof(hook_event_int_t, hei_node));
+	list_create(&new->hfi_nhead, sizeof (hook_notify_t),
+	    offsetof(hook_notify_t, hn_node));
 
 	hook_wait_init(&new->hfi_waiter, &new->hfi_lock);
 
@@ -932,10 +946,9 @@ hook_family_add(hook_family_t *hf, hook_stack_t *hks, void **store)
 	if (store != NULL)
 		*store = new;
 
-	/* Add to family list head */
-	SLIST_INSERT_HEAD(&hks->hks_familylist, new, hfi_entry);
+	list_insert_head(&hks->hks_familylist, new);
 
-	CVW_EXIT_WRITE(&hks->hks_lock);
+	rw_exit(&hks->hks_lock);
 	mutex_exit(&hook_stack_lock);
 
 	hook_stack_notify_run(hks, hf->hf_name, HN_REGISTER);
@@ -963,19 +976,19 @@ hook_family_remove(hook_family_int_t *hfi)
 	ASSERT(hfi != NULL);
 	hks = hfi->hfi_stack;
 
-	CVW_ENTER_WRITE(&hfi->hfi_lock);
+	rw_enter(&hfi->hfi_lock, RW_WRITER);
 	notifydone = hfi->hfi_shutdown;
 	hfi->hfi_shutdown = B_TRUE;
-	CVW_EXIT_WRITE(&hfi->hfi_lock);
+	rw_exit(&hfi->hfi_lock);
 
-	CVW_ENTER_WRITE(&hks->hks_lock);
+	rw_enter(&hks->hks_lock, RW_WRITER);
 
 	if (hook_wait_setflag(&hks->hks_waiter, FWF_DEL_WAIT_MASK,
 	    FWF_DEL_WANTED, FWF_DEL_ACTIVE) == -1) {
 		/*
 		 * If we're trying to destroy the hook_stack_t...
 		 */
-		CVW_EXIT_WRITE(&hks->hks_lock);
+		rw_exit(&hks->hks_lock);
 		return (ENXIO);
 	}
 
@@ -983,7 +996,7 @@ hook_family_remove(hook_family_int_t *hfi)
 	 * Check if the family is in use by the presence of either events
 	 * or notify callbacks on the hook family.
 	 */
-	if (!SLIST_EMPTY(&hfi->hfi_head) || !TAILQ_EMPTY(&hfi->hfi_nhead)) {
+	if (!list_is_empty(&hfi->hfi_head) || !list_is_empty(&hfi->hfi_nhead)) {
 		hfi->hfi_condemned = B_TRUE;
 	} else {
 		VERIFY(hook_wait_destroy(&hfi->hfi_waiter) == 0);
@@ -993,7 +1006,7 @@ hook_family_remove(hook_family_int_t *hfi)
 		 */
 		hfi->hfi_condemned = B_FALSE;
 	}
-	CVW_EXIT_WRITE(&hks->hks_lock);
+	rw_exit(&hks->hks_lock);
 
 	if (!notifydone)
 		hook_stack_notify_run(hks, hfi->hfi_family.hf_name,
@@ -1033,12 +1046,11 @@ hook_family_free(hook_family_int_t *hfi, hook_stack_t *hks)
 	ASSERT(hfi != NULL);
 
 	if (hks != NULL) {
-		CVW_ENTER_WRITE(&hks->hks_lock);
+		rw_enter(&hks->hks_lock, RW_WRITER);
 		/* Remove from family list */
-		SLIST_REMOVE(&hks->hks_familylist, hfi, hook_family_int,
-		    hfi_entry);
+		list_remove(&hks->hks_familylist, hfi);
 
-		CVW_EXIT_WRITE(&hks->hks_lock);
+		rw_exit(&hks->hks_lock);
 	}
 
 	/* Free name space */
@@ -1075,23 +1087,23 @@ hook_family_shutdown(hook_family_int_t *hfi)
 	ASSERT(hfi != NULL);
 	hks = hfi->hfi_stack;
 
-	CVW_ENTER_WRITE(&hfi->hfi_lock);
+	rw_enter(&hfi->hfi_lock, RW_WRITER);
 	notifydone = hfi->hfi_shutdown;
 	hfi->hfi_shutdown = B_TRUE;
-	CVW_EXIT_WRITE(&hfi->hfi_lock);
+	rw_exit(&hfi->hfi_lock);
 
-	CVW_ENTER_WRITE(&hks->hks_lock);
+	rw_enter(&hks->hks_lock, RW_WRITER);
 
 	if (hook_wait_setflag(&hks->hks_waiter, FWF_DEL_WAIT_MASK,
 	    FWF_DEL_WANTED, FWF_DEL_ACTIVE) == -1) {
 		/*
 		 * If we're trying to destroy the hook_stack_t...
 		 */
-		CVW_EXIT_WRITE(&hks->hks_lock);
+		rw_exit(&hks->hks_lock);
 		return (ENXIO);
 	}
 
-	CVW_EXIT_WRITE(&hks->hks_lock);
+	rw_exit(&hks->hks_lock);
 
 	if (!notifydone)
 		hook_stack_notify_run(hks, hfi->hfi_family.hf_name,
@@ -1125,8 +1137,10 @@ hook_family_copy(hook_family_t *src)
 	dst = &new->hfi_family;
 	*dst = *src;
 
-	SLIST_INIT(&new->hfi_head);
-	TAILQ_INIT(&new->hfi_nhead);
+	list_create(&new->hfi_head, sizeof (hook_event_int_t),
+	    offsetof(hook_event_int_t, hei_node));
+	list_create(&new->hfi_nhead, sizeof (hook_notify_t),
+	    offsetof(hook_notify_t, hn_node));
 
 	/* Copy name */
 	dst->hf_name = (char *)kmem_alloc(strlen(src->hf_name) + 1, KM_SLEEP);
@@ -1150,7 +1164,8 @@ hook_family_find(char *family, hook_stack_t *hks)
 
 	ASSERT(family != NULL);
 
-	SLIST_FOREACH(hfi, &hks->hks_familylist, hfi_entry) {
+	hfi = list_head(&hks->hks_familylist);
+	for (; hfi != NULL; hfi = list_next(&hks->hks_familylist, hfi)) {
 		if (strcmp(hfi->hfi_family.hf_name, family) == 0)
 			break;
 	}
@@ -1188,24 +1203,25 @@ hook_family_notify_register(hook_family_int_t *hfi,
 	canrun = B_FALSE;
 	hks = hfi->hfi_stack;
 
-	CVW_ENTER_READ(&hks->hks_lock);
+	rw_enter(&hks->hks_lock, RW_READER_STARVEWRITER);
 
 	if ((hfi->hfi_stack->hks_shutdown != 0) ||
 	    hfi->hfi_condemned || hfi->hfi_shutdown) {
-		CVW_EXIT_READ(&hks->hks_lock);
+		rw_exit(&hks->hks_lock);
 		return (ESHUTDOWN);
 	}
 
-	CVW_ENTER_WRITE(&hfi->hfi_lock);
+	rw_enter(&hfi->hfi_lock, RW_WRITER);
 	canrun = (hook_wait_setflag(&hfi->hfi_waiter, FWF_ADD_WAIT_MASK,
 	    FWF_ADD_WANTED, FWF_ADD_ACTIVE) != -1);
 	error = hook_notify_register(&hfi->hfi_nhead, callback, arg);
-	CVW_EXIT_WRITE(&hfi->hfi_lock);
+	rw_exit(&hfi->hfi_lock);
 
-	CVW_EXIT_READ(&hks->hks_lock);
+	rw_exit(&hks->hks_lock);
 
 	if (error == 0 && canrun) {
-		SLIST_FOREACH(hei, &hfi->hfi_head, hei_entry) {
+		hei = list_head(&hfi->hfi_head);
+		for (; hei != NULL; hei = list_next(&hfi->hfi_head, hei)) {
 			callback(HN_REGISTER, arg,
 			    hfi->hfi_family.hf_name, NULL,
 			    hei->hei_event->he_name);
@@ -1253,7 +1269,7 @@ hook_family_notify_unregister(hook_family_int_t *hfi,
 
 	canrun = B_FALSE;
 
-	CVW_ENTER_WRITE(&hfi->hfi_lock);
+	rw_enter(&hfi->hfi_lock, RW_WRITER);
 
 	(void) hook_wait_setflag(&hfi->hfi_waiter, FWF_DEL_WAIT_MASK,
 	    FWF_DEL_WANTED, FWF_DEL_ACTIVE);
@@ -1267,7 +1283,7 @@ hook_family_notify_unregister(hook_family_int_t *hfi,
 	 * "busy" ... but we might have just made it "unbusy"...
 	 */
 	if ((error == 0) && hfi->hfi_condemned &&
-	    SLIST_EMPTY(&hfi->hfi_head) && TAILQ_EMPTY(&hfi->hfi_nhead)) {
+	    list_is_empty(&hfi->hfi_head) && list_is_empty(&hfi->hfi_nhead)) {
 		free_family = B_TRUE;
 	} else {
 		free_family = B_FALSE;
@@ -1278,10 +1294,11 @@ hook_family_notify_unregister(hook_family_int_t *hfi,
 		    FWF_ADD_WANTED, FWF_ADD_ACTIVE) != -1);
 	}
 
-	CVW_EXIT_WRITE(&hfi->hfi_lock);
+	rw_exit(&hfi->hfi_lock);
 
 	if (canrun) {
-		SLIST_FOREACH(hei, &hfi->hfi_head, hei_entry) {
+		for (hei = list_head(&hfi->hfi_head); hei != NULL;
+		    hei = list_next(&hfi->hfi_head, hei)) {
 			callback(HN_UNREGISTER, arg,
 			    hfi->hfi_family.hf_name, NULL,
 			    hei->hei_event->he_name);
@@ -1321,11 +1338,11 @@ hook_event_add(hook_family_int_t *hfi, hook_event_t *he)
 		return (NULL);
 
 	hks = hfi->hfi_stack;
-	CVW_ENTER_READ(&hks->hks_lock);
+	rw_enter(&hks->hks_lock, RW_READER_STARVEWRITER);
 
 	hks = hfi->hfi_stack;
 	if (hks->hks_shutdown != 0) {
-		CVW_EXIT_READ(&hks->hks_lock);
+		rw_exit(&hks->hks_lock);
 		hook_event_free(new, NULL);
 		return (NULL);
 	}
@@ -1333,37 +1350,38 @@ hook_event_add(hook_family_int_t *hfi, hook_event_t *he)
 	/* Check whether this event pointer is already registered */
 	hei = hook_event_checkdup(he, hks);
 	if (hei != NULL) {
-		CVW_EXIT_READ(&hks->hks_lock);
+		rw_exit(&hks->hks_lock);
 		hook_event_free(new, NULL);
 		return (NULL);
 	}
 
-	CVW_ENTER_WRITE(&hfi->hfi_lock);
+	rw_enter(&hfi->hfi_lock, RW_WRITER);
 
 	if (hfi->hfi_condemned || hfi->hfi_shutdown) {
-		CVW_EXIT_WRITE(&hfi->hfi_lock);
-		CVW_EXIT_READ(&hks->hks_lock);
+		rw_exit(&hfi->hfi_lock);
+		rw_exit(&hks->hks_lock);
 		hook_event_free(new, NULL);
 		return (NULL);
 	}
-	CVW_EXIT_READ(&hks->hks_lock);
+	rw_exit(&hks->hks_lock);
 
 	if (hook_wait_setflag(&hfi->hfi_waiter, FWF_ADD_WAIT_MASK,
 	    FWF_ADD_WANTED, FWF_ADD_ACTIVE) == -1) {
-		CVW_EXIT_WRITE(&hfi->hfi_lock);
+		rw_exit(&hfi->hfi_lock);
 		hook_event_free(new, NULL);
 		return (NULL);
 	}
 
-	TAILQ_INIT(&new->hei_nhead);
+	list_create(&new->hei_nhead, sizeof (hook_notify_t),
+	    offsetof(hook_notify_t, hn_node));
 
 	hook_event_init_kstats(hfi, new);
 	hook_wait_init(&new->hei_waiter, &new->hei_lock);
 
 	/* Add to event list head */
-	SLIST_INSERT_HEAD(&hfi->hfi_head, new, hei_entry);
+	list_insert_head(&hfi->hfi_head, new);
 
-	CVW_EXIT_WRITE(&hfi->hfi_lock);
+	rw_exit(&hfi->hfi_lock);
 
 	hook_notify_run(&hfi->hfi_nhead,
 	    hfi->hfi_family.hf_name, NULL, he->he_name, HN_REGISTER);
@@ -1436,7 +1454,7 @@ hook_event_remove(hook_family_int_t *hfi, hook_event_t *he)
 	ASSERT(hfi != NULL);
 	ASSERT(he != NULL);
 
-	CVW_ENTER_WRITE(&hfi->hfi_lock);
+	rw_enter(&hfi->hfi_lock, RW_WRITER);
 
 	/*
 	 * Set the flag so that we can call hook_event_notify_run without
@@ -1445,20 +1463,20 @@ hook_event_remove(hook_family_int_t *hfi, hook_event_t *he)
 	 */
 	if (hook_wait_setflag(&hfi->hfi_waiter, FWF_DEL_WAIT_MASK,
 	    FWF_DEL_WANTED, FWF_DEL_ACTIVE) == -1) {
-		CVW_EXIT_WRITE(&hfi->hfi_lock);
+		rw_exit(&hfi->hfi_lock);
 		return (ENXIO);
 	}
 
 	hei = hook_event_find(hfi, he->he_name);
 	if (hei == NULL) {
 		hook_wait_unsetflag(&hfi->hfi_waiter, FWF_DEL_ACTIVE);
-		CVW_EXIT_WRITE(&hfi->hfi_lock);
+		rw_exit(&hfi->hfi_lock);
 		return (ESRCH);
 	}
 
 	free_family = B_FALSE;
 
-	CVW_ENTER_WRITE(&hei->hei_lock);
+	rw_enter(&hei->hei_lock, RW_WRITER);
 	/*
 	 * The hei_shutdown flag is used to indicate whether or not we have
 	 * done a shutdown and thus already walked through the notify list.
@@ -1470,9 +1488,9 @@ hook_event_remove(hook_family_int_t *hfi, hook_event_t *he)
 	 * there are any notifiers registered, return an error indicating
 	 * that the event is still busy.
 	 */
-	if (!TAILQ_EMPTY(&hei->hei_head) || !TAILQ_EMPTY(&hei->hei_nhead)) {
+	if (!list_is_empty(&hei->hei_head) || !list_is_empty(&hei->hei_nhead)) {
 		hei->hei_condemned = B_TRUE;
-		CVW_EXIT_WRITE(&hei->hei_lock);
+		rw_exit(&hei->hei_lock);
 	} else {
 		/* hei_condemned = B_FALSE is implied from creation */
 		/*
@@ -1482,14 +1500,14 @@ hook_event_remove(hook_family_int_t *hfi, hook_event_t *he)
 		 */
 		VERIFY(hook_wait_destroy(&hei->hei_waiter) == 0);
 
-		CVW_EXIT_WRITE(&hei->hei_lock);
+		rw_exit(&hei->hei_lock);
 
-		if (hfi->hfi_condemned && SLIST_EMPTY(&hfi->hfi_head) &&
-		    TAILQ_EMPTY(&hfi->hfi_nhead))
+		if (hfi->hfi_condemned && list_is_empty(&hfi->hfi_head) &&
+		    list_is_empty(&hfi->hfi_nhead))
 			free_family = B_TRUE;
 	}
 
-	CVW_EXIT_WRITE(&hfi->hfi_lock);
+	rw_exit(&hfi->hfi_lock);
 
 	if (!notifydone)
 		hook_notify_run(&hfi->hfi_nhead,
@@ -1524,7 +1542,7 @@ hook_event_shutdown(hook_family_int_t *hfi, hook_event_t *he)
 	ASSERT(hfi != NULL);
 	ASSERT(he != NULL);
 
-	CVW_ENTER_WRITE(&hfi->hfi_lock);
+	rw_enter(&hfi->hfi_lock, RW_WRITER);
 
 	/*
 	 * Set the flag so that we can call hook_event_notify_run without
@@ -1533,23 +1551,23 @@ hook_event_shutdown(hook_family_int_t *hfi, hook_event_t *he)
 	 */
 	if (hook_wait_setflag(&hfi->hfi_waiter, FWF_DEL_WAIT_MASK,
 	    FWF_DEL_WANTED, FWF_DEL_ACTIVE) == -1) {
-		CVW_EXIT_WRITE(&hfi->hfi_lock);
+		rw_exit(&hfi->hfi_lock);
 		return (ENXIO);
 	}
 
 	hei = hook_event_find(hfi, he->he_name);
 	if (hei == NULL) {
 		hook_wait_unsetflag(&hfi->hfi_waiter, FWF_DEL_ACTIVE);
-		CVW_EXIT_WRITE(&hfi->hfi_lock);
+		rw_exit(&hfi->hfi_lock);
 		return (ESRCH);
 	}
 
-	CVW_ENTER_WRITE(&hei->hei_lock);
+	rw_enter(&hei->hei_lock, RW_WRITER);
 	notifydone = hei->hei_shutdown;
 	hei->hei_shutdown = B_TRUE;
-	CVW_EXIT_WRITE(&hei->hei_lock);
+	rw_exit(&hei->hei_lock);
 
-	CVW_EXIT_WRITE(&hfi->hfi_lock);
+	rw_exit(&hfi->hfi_lock);
 
 	if (!notifydone)
 		hook_notify_run(&hfi->hfi_nhead,
@@ -1575,18 +1593,18 @@ hook_event_free(hook_event_int_t *hei, hook_family_int_t *hfi)
 	ASSERT(hei != NULL);
 
 	if (hfi != NULL) {
-		CVW_ENTER_WRITE(&hfi->hfi_lock);
+		rw_enter(&hfi->hfi_lock, RW_WRITER);
 		/*
 		 * Remove the event from the hook family's list.
 		 */
-		SLIST_REMOVE(&hfi->hfi_head, hei, hook_event_int, hei_entry);
-		if (hfi->hfi_condemned && SLIST_EMPTY(&hfi->hfi_head) &&
-		    TAILQ_EMPTY(&hfi->hfi_nhead)) {
+		list_remove(&hfi->hfi_head, hei);
+		if (hfi->hfi_condemned && list_is_empty(&hfi->hfi_head) &&
+		    list_is_empty(&hfi->hfi_nhead)) {
 			free_family = B_TRUE;
 		} else {
 			free_family = B_FALSE;
 		}
-		CVW_EXIT_WRITE(&hfi->hfi_lock);
+		rw_exit(&hfi->hfi_lock);
 	}
 
 	if (hei->hei_kstatp != NULL) {
@@ -1620,16 +1638,18 @@ hook_event_checkdup(hook_event_t *he, hook_stack_t *hks)
 
 	ASSERT(he != NULL);
 
-	CVW_ENTER_READ(&hks->hks_lock);
-	SLIST_FOREACH(hfi, &hks->hks_familylist, hfi_entry) {
-		SLIST_FOREACH(hei, &hfi->hfi_head, hei_entry) {
+	rw_enter(&hks->hks_lock, RW_READER_STARVEWRITER);
+	hfi = list_head(&hks->hks_familylist);
+	for (; hfi != NULL; hfi = list_next(&hks->hks_familylist, hfi)) {
+		hei = list_head(&hfi->hfi_head);
+		for (; hei != NULL; hei = list_next(&hfi->hfi_head, hei)) {
 			if (hei->hei_event == he) {
-				CVW_EXIT_READ(&hks->hks_lock);
+				rw_exit(&hks->hks_lock);
 				return (hei);
 			}
 		}
 	}
-	CVW_EXIT_READ(&hks->hks_lock);
+	rw_exit(&hks->hks_lock);
 
 	return (NULL);
 }
@@ -1653,7 +1673,8 @@ hook_event_copy(hook_event_t *src)
 	new = (hook_event_int_t *)kmem_zalloc(sizeof (*new), KM_SLEEP);
 
 	/* Copy body */
-	TAILQ_INIT(&new->hei_head);
+	list_create(&new->hei_head, sizeof (hook_int_t),
+	    offsetof(hook_int_t, hi_node));
 	new->hei_event = src;
 
 	return (new);
@@ -1676,7 +1697,8 @@ hook_event_find(hook_family_int_t *hfi, char *event)
 	ASSERT(hfi != NULL);
 	ASSERT(event != NULL);
 
-	SLIST_FOREACH(hei, &hfi->hfi_head, hei_entry) {
+	hei = list_head(&hfi->hfi_head);
+	for (; hei != NULL; hei = list_next(&hfi->hfi_head, hei)) {
 		if ((strcmp(hei->hei_event->he_name, event) == 0) &&
 		    ((hei->hei_waiter.fw_flags & FWF_UNSAFE) == 0))
 			break;
@@ -1708,44 +1730,45 @@ hook_event_notify_register(hook_family_int_t *hfi, char *event,
 
 	canrun = B_FALSE;
 	hks = hfi->hfi_stack;
-	CVW_ENTER_READ(&hks->hks_lock);
+	rw_enter(&hks->hks_lock, RW_READER_STARVEWRITER);
 	if (hks->hks_shutdown != 0) {
-		CVW_EXIT_READ(&hks->hks_lock);
+		rw_exit(&hks->hks_lock);
 		return (ESHUTDOWN);
 	}
 
-	CVW_ENTER_READ(&hfi->hfi_lock);
+	rw_enter(&hfi->hfi_lock, RW_READER_STARVEWRITER);
 
 	if (hfi->hfi_condemned || hfi->hfi_shutdown) {
-		CVW_EXIT_READ(&hfi->hfi_lock);
-		CVW_EXIT_READ(&hks->hks_lock);
+		rw_exit(&hfi->hfi_lock);
+		rw_exit(&hks->hks_lock);
 		return (ESHUTDOWN);
 	}
 
 	hei = hook_event_find(hfi, event);
 	if (hei == NULL) {
-		CVW_EXIT_READ(&hfi->hfi_lock);
-		CVW_EXIT_READ(&hks->hks_lock);
+		rw_exit(&hfi->hfi_lock);
+		rw_exit(&hks->hks_lock);
 		return (ESRCH);
 	}
 
 	if (hei->hei_condemned || hei->hei_shutdown) {
-		CVW_EXIT_READ(&hfi->hfi_lock);
-		CVW_EXIT_READ(&hks->hks_lock);
+		rw_exit(&hfi->hfi_lock);
+		rw_exit(&hks->hks_lock);
 		return (ESHUTDOWN);
 	}
 
-	CVW_ENTER_WRITE(&hei->hei_lock);
+	rw_enter(&hei->hei_lock, RW_WRITER);
 	canrun = (hook_wait_setflag(&hei->hei_waiter, FWF_ADD_WAIT_MASK,
 	    FWF_ADD_WANTED, FWF_ADD_ACTIVE) != -1);
 	error = hook_notify_register(&hei->hei_nhead, callback, arg);
-	CVW_EXIT_WRITE(&hei->hei_lock);
+	rw_exit(&hei->hei_lock);
 
-	CVW_EXIT_READ(&hfi->hfi_lock);
-	CVW_EXIT_READ(&hks->hks_lock);
+	rw_exit(&hfi->hfi_lock);
+	rw_exit(&hks->hks_lock);
 
 	if (error == 0 && canrun) {
-		TAILQ_FOREACH(h, &hei->hei_head, hi_entry) {
+		h = list_head(&hei->hei_head);
+		for (; h != NULL; h = list_next(&hei->hei_head, h)) {
 			callback(HN_REGISTER, arg,
 			    hfi->hfi_family.hf_name, hei->hei_event->he_name,
 			    h->hi_hook.h_name);
@@ -1781,15 +1804,15 @@ hook_event_notify_unregister(hook_family_int_t *hfi, char *event,
 
 	canrun = B_FALSE;
 
-	CVW_ENTER_READ(&hfi->hfi_lock);
+	rw_enter(&hfi->hfi_lock, RW_READER_STARVEWRITER);
 
 	hei = hook_event_find(hfi, event);
 	if (hei == NULL) {
-		CVW_EXIT_READ(&hfi->hfi_lock);
+		rw_exit(&hfi->hfi_lock);
 		return (ESRCH);
 	}
 
-	CVW_ENTER_WRITE(&hei->hei_lock);
+	rw_enter(&hei->hei_lock, RW_WRITER);
 
 	(void) hook_wait_setflag(&hei->hei_waiter, FWF_DEL_WAIT_MASK,
 	    FWF_DEL_WANTED, FWF_DEL_ACTIVE);
@@ -1807,7 +1830,7 @@ hook_event_notify_unregister(hook_family_int_t *hfi, char *event,
 	 * call hook_event_remove.
 	 */
 	if ((error == 0) && hei->hei_condemned &&
-	    TAILQ_EMPTY(&hei->hei_head) && TAILQ_EMPTY(&hei->hei_nhead)) {
+	    list_is_empty(&hei->hei_head) && list_is_empty(&hei->hei_nhead)) {
 		free_event = B_TRUE;
 	} else {
 		free_event = B_FALSE;
@@ -1818,11 +1841,12 @@ hook_event_notify_unregister(hook_family_int_t *hfi, char *event,
 		    FWF_ADD_WANTED, FWF_ADD_ACTIVE) != -1);
 	}
 
-	CVW_EXIT_WRITE(&hei->hei_lock);
-	CVW_EXIT_READ(&hfi->hfi_lock);
+	rw_exit(&hei->hei_lock);
+	rw_exit(&hfi->hfi_lock);
 
 	if (canrun) {
-		TAILQ_FOREACH(h, &hei->hei_head, hi_entry) {
+		h = list_head(&hei->hei_head);
+		for (; h != NULL; h = list_next(&hei->hei_head, h)) {
 			callback(HN_UNREGISTER, arg,
 			    hfi->hfi_family.hf_name, hei->hei_event->he_name,
 			    h->hi_hook.h_name);
@@ -1895,16 +1919,16 @@ hook_register(hook_family_int_t *hfi, char *event, hook_t *h)
 	 * to hold global family write lock. Just get read lock here to
 	 * ensure event will not be removed when doing hooks operation
 	 */
-	CVW_ENTER_WRITE(&hfi->hfi_lock);
+	rw_enter(&hfi->hfi_lock, RW_WRITER);
 
 	hei = hook_event_find(hfi, event);
 	if (hei == NULL) {
-		CVW_EXIT_WRITE(&hfi->hfi_lock);
+		rw_exit(&hfi->hfi_lock);
 		hook_int_free(new, hfi->hfi_stack->hks_netstackid);
 		return (ENXIO);
 	}
 
-	CVW_ENTER_WRITE(&hei->hei_lock);
+	rw_enter(&hei->hei_lock, RW_WRITER);
 
 	/*
 	 * If we've run either the remove() or shutdown(), do not allow any
@@ -1925,8 +1949,8 @@ hook_register(hook_family_int_t *hfi, char *event, hook_t *h)
 	    FWF_ADD_WANTED, FWF_ADD_ACTIVE) == -1) {
 		error = ENOENT;
 bad_add:
-		CVW_EXIT_WRITE(&hei->hei_lock);
-		CVW_EXIT_WRITE(&hfi->hfi_lock);
+		rw_exit(&hei->hei_lock);
+		rw_exit(&hfi->hfi_lock);
 		hook_int_free(new, hfi->hfi_stack->hks_netstackid);
 		return (error);
 	}
@@ -1940,8 +1964,8 @@ bad_add:
 		hook_init_kstats(hfi, hei, new);
 	}
 
-	CVW_EXIT_WRITE(&hei->hei_lock);
-	CVW_EXIT_WRITE(&hfi->hfi_lock);
+	rw_exit(&hei->hei_lock);
+	rw_exit(&hfi->hfi_lock);
 
 	/*
 	 * Note that the name string passed through to the notify callbacks
@@ -1969,7 +1993,7 @@ bad_add:
  * loosely coupled with the action.
  */
 static int
-hook_insert(hook_int_head_t *head, hook_int_t *new)
+hook_insert(list_t *head, hook_int_t *new)
 {
 	hook_int_t *before;
 	hook_int_t *hi;
@@ -1987,12 +2011,13 @@ hook_insert(hook_int_head_t *head, hook_int_t *new)
 		 * list - this means we keep any wanting to be first
 		 * happy without having to search for HH_FIRST.
 		 */
-		TAILQ_FOREACH(hi, head, hi_entry) {
+		hi = list_head(head);
+		for (; hi != NULL; hi = list_next(head, hi)) {
 			hih = &hi->hi_hook;
 			if ((hih->h_hint == HH_AFTER) &&
 			    (strcmp(h->h_name,
 			    (char *)hih->h_hintvalue) == 0)) {
-				TAILQ_INSERT_BEFORE(hi, new, hi_entry);
+				list_insert_before(head, hi, new);
 				return (0);
 			}
 			if ((hih->h_hint == HH_BEFORE) && (before == NULL) &&
@@ -2002,24 +2027,24 @@ hook_insert(hook_int_head_t *head, hook_int_t *new)
 			}
 		}
 		if (before != NULL) {
-			TAILQ_INSERT_AFTER(head, before, new, hi_entry);
+			list_insert_after(head, before, new);
 			return (0);
 		}
 		hook_insert_plain(head, new);
 		break;
 
 	case HH_FIRST :
-		hi = TAILQ_FIRST(head);
+		hi = list_head(head);
 		if ((hi != NULL) && (hi->hi_hook.h_hint == HH_FIRST))
 			return (EBUSY);
-		TAILQ_INSERT_HEAD(head, new, hi_entry);
+		list_insert_head(head, new);
 		break;
 
 	case HH_LAST :
-		hi = TAILQ_LAST(head, hook_int_head);
+		hi = list_tail(head);
 		if ((hi != NULL) && (hi->hi_hook.h_hint == HH_LAST))
 			return (EBUSY);
-		TAILQ_INSERT_TAIL(head, new, hi_entry);
+		list_insert_tail(head, new);
 		break;
 
 	case HH_BEFORE :
@@ -2030,7 +2055,7 @@ hook_insert(hook_int_head_t *head, hook_int_t *new)
 		if (hi->hi_hook.h_hint == HH_FIRST)
 			return (EBUSY);
 
-		TAILQ_INSERT_BEFORE(hi, new, hi_entry);
+		list_insert_before(head, hi, new);
 		break;
 
 	case HH_AFTER :
@@ -2041,7 +2066,7 @@ hook_insert(hook_int_head_t *head, hook_int_t *new)
 		if (hi->hi_hook.h_hint == HH_LAST)
 			return (EBUSY);
 
-		TAILQ_INSERT_AFTER(head, hi, new, hi_entry);
+		list_insert_after(head, hi, new);
 		break;
 
 	default :
@@ -2063,19 +2088,19 @@ hook_insert(hook_int_head_t *head, hook_int_t *new)
  * happy without having to search for HH_FIRST.
  */
 static void
-hook_insert_plain(hook_int_head_t *head, hook_int_t *new)
+hook_insert_plain(list_t *head, hook_int_t *new)
 {
 	hook_int_t *hi;
 
-	hi = TAILQ_FIRST(head);
+	hi = list_head(head);
 	if (hi != NULL) {
 		if (hi->hi_hook.h_hint == HH_LAST) {
-			TAILQ_INSERT_BEFORE(hi, new, hi_entry);
+			list_insert_before(head, hi, new);
 		} else {
-			TAILQ_INSERT_TAIL(head, new, hi_entry);
+			list_insert_tail(head, new);
 		}
 	} else {
-		TAILQ_INSERT_TAIL(head, new, hi_entry);
+		list_insert_tail(head, new);
 	}
 }
 
@@ -2096,7 +2121,7 @@ hook_insert_plain(hook_int_head_t *head, hook_int_t *new)
  * is innocuous to existing efforts.
  */
 static int
-hook_insert_afterbefore(hook_int_head_t *head, hook_int_t *new)
+hook_insert_afterbefore(list_t *head, hook_int_t *new)
 {
 	hook_int_t *hi;
 	hook_t *nh;
@@ -2111,7 +2136,7 @@ hook_insert_afterbefore(hook_int_head_t *head, hook_int_t *new)
 	 * First, look through the list to see if there are any other
 	 * before's or after's that have a matching hint name.
 	 */
-	TAILQ_FOREACH(hi, head, hi_entry) {
+	for (hi = list_head(head); hi != NULL; hi = list_next(head, hi)) {
 		h = &hi->hi_hook;
 		switch (h->h_hint) {
 		case HH_FIRST :
@@ -2122,13 +2147,13 @@ hook_insert_afterbefore(hook_int_head_t *head, hook_int_t *new)
 			if ((nh->h_hint == HH_BEFORE) &&
 			    (strcmp((char *)h->h_hintvalue,
 			    (char *)nh->h_hintvalue) == 0)) {
-				TAILQ_INSERT_AFTER(head, hi, new, hi_entry);
+				list_insert_after(head, hi, new);
 				return (0);
 			}
 			if ((nh->h_hint == HH_AFTER) &&
 			    (strcmp((char *)h->h_hintvalue,
 			    (char *)nh->h_hintvalue) == 0)) {
-				TAILQ_INSERT_BEFORE(hi, new, hi_entry);
+				list_insert_before(head, hi, new);
 				return (0);
 			}
 			break;
@@ -2136,13 +2161,13 @@ hook_insert_afterbefore(hook_int_head_t *head, hook_int_t *new)
 			if ((nh->h_hint == HH_AFTER) &&
 			    (strcmp((char *)h->h_hintvalue,
 			    (char *)nh->h_hintvalue) == 0)) {
-				TAILQ_INSERT_AFTER(head, hi, new, hi_entry);
+				list_insert_after(head, hi, new);
 				return (0);
 			}
 			if ((nh->h_hint == HH_BEFORE) &&
 			    (strcmp((char *)h->h_hintvalue,
 			    (char *)nh->h_hintvalue) == 0)) {
-				TAILQ_INSERT_BEFORE(hi, new, hi_entry);
+				list_insert_before(head, hi, new);
 				return (0);
 			}
 			break;
@@ -2173,49 +2198,49 @@ hook_unregister(hook_family_int_t *hfi, char *event, hook_t *h)
 	ASSERT(hfi != NULL);
 	ASSERT(h != NULL);
 
-	CVW_ENTER_WRITE(&hfi->hfi_lock);
+	rw_enter(&hfi->hfi_lock, RW_WRITER);
 
 	hei = hook_event_find(hfi, event);
 	if (hei == NULL) {
-		CVW_EXIT_WRITE(&hfi->hfi_lock);
+		rw_exit(&hfi->hfi_lock);
 		return (ENXIO);
 	}
 
 	/* Hold write lock for event */
-	CVW_ENTER_WRITE(&hei->hei_lock);
+	rw_enter(&hei->hei_lock, RW_WRITER);
 
 	hi = hook_find(hei, h);
 	if (hi == NULL) {
-		CVW_EXIT_WRITE(&hei->hei_lock);
-		CVW_EXIT_WRITE(&hfi->hfi_lock);
+		rw_exit(&hei->hei_lock);
+		rw_exit(&hfi->hfi_lock);
 		return (ENXIO);
 	}
 
 	if (hook_wait_setflag(&hei->hei_waiter, FWF_DEL_WAIT_MASK,
 	    FWF_DEL_WANTED, FWF_DEL_ACTIVE) == -1) {
-		CVW_EXIT_WRITE(&hei->hei_lock);
-		CVW_EXIT_WRITE(&hfi->hfi_lock);
+		rw_exit(&hei->hei_lock);
+		rw_exit(&hfi->hfi_lock);
 		return (ENOENT);
 	}
 
 	/* Remove from hook list */
-	TAILQ_REMOVE(&hei->hei_head, hi, hi_entry);
+	list_remove(&hei->hei_head, hi);
 
 	free_event = B_FALSE;
-	if (TAILQ_EMPTY(&hei->hei_head)) {
+	if (list_is_empty(&hei->hei_head)) {
 		hei->hei_event->he_interested = B_FALSE;
 		/*
 		 * If the delete pending flag has been set and there are
 		 * no notifiers on the event (and we've removed the last
 		 * hook) then we need to free this event after we're done.
 		 */
-		if (hei->hei_condemned && TAILQ_EMPTY(&hei->hei_nhead))
+		if (hei->hei_condemned && list_is_empty(&hei->hei_nhead))
 			free_event = B_TRUE;
 	}
 	hei->hei_kstats.hooks_removed.value.ui64++;
 
-	CVW_EXIT_WRITE(&hei->hei_lock);
-	CVW_EXIT_WRITE(&hfi->hfi_lock);
+	rw_exit(&hei->hei_lock);
+	rw_exit(&hfi->hfi_lock);
 	/*
 	 * While the FWF_DEL_ACTIVE flag is set, the hook_event_int_t
 	 * will not be free'd and thus the hook_family_int_t wil not
@@ -2242,11 +2267,11 @@ hook_unregister(hook_family_int_t *hfi, char *event, hook_t *h)
  * has a matching name to the one being looked for.
  */
 static hook_int_t *
-hook_find_byname(hook_int_head_t *head, char *name)
+hook_find_byname(list_t *head, char *name)
 {
 	hook_int_t *hi;
 
-	TAILQ_FOREACH(hi, head, hi_entry) {
+	for (hi = list_head(head); hi != NULL; hi = list_next(head, hi)) {
 		if (strcmp(hi->hi_hook.h_name, name) == 0)
 			return (hi);
 	}
@@ -2399,7 +2424,8 @@ hook_init_kstats(hook_family_int_t *hfi, hook_event_int_t *hei, hook_int_t *hi)
 	}
 
 	position = 1;
-	TAILQ_FOREACH(h, &hei->hei_head, hi_entry) {
+	h = list_head(&hei->hei_head);
+	for (; h != NULL; h = list_next(&hei->hei_head, h)) {
 		h->hi_kstats.hook_position.value.ui32 = position++;
 	}
 }
@@ -2493,12 +2519,12 @@ hook_free(hook_t *h)
  * that has happened.
  */
 static int
-hook_notify_register(hook_notify_head_t *head, hook_notify_fn_t callback,
+hook_notify_register(list_t *head, hook_notify_fn_t callback,
     void *arg)
 {
 	hook_notify_t *hn;
 
-	TAILQ_FOREACH(hn, head, hn_entry) {
+	for (hn = list_head(head); hn != NULL; hn = list_next(head, hn)) {
 		if (hn->hn_func == callback) {
 			return (EEXIST);
 		}
@@ -2507,7 +2533,7 @@ hook_notify_register(hook_notify_head_t *head, hook_notify_fn_t callback,
 	hn = (hook_notify_t *)kmem_alloc(sizeof (*hn), KM_SLEEP);
 	hn->hn_func = callback;
 	hn->hn_arg = arg;
-	TAILQ_INSERT_TAIL(head, hn, hn_entry);
+	list_insert_tail(head, hn);
 
 	return (0);
 }
@@ -2525,14 +2551,14 @@ hook_notify_register(hook_notify_head_t *head, hook_notify_fn_t callback,
  * when a notify-unregister is performed.
  */
 static int
-hook_notify_unregister(hook_notify_head_t *head,
+hook_notify_unregister(list_t *head,
     hook_notify_fn_t callback, void **parg)
 {
 	hook_notify_t *hn;
 
 	ASSERT(parg != NULL);
 
-	TAILQ_FOREACH(hn, head, hn_entry) {
+	for (hn = list_head(head); hn != NULL; hn = list_next(head, hn)) {
 		if (hn->hn_func == callback)
 			break;
 	}
@@ -2542,7 +2568,7 @@ hook_notify_unregister(hook_notify_head_t *head,
 
 	*parg = hn->hn_arg;
 
-	TAILQ_REMOVE(head, hn, hn_entry);
+	list_remove(head, hn);
 
 	kmem_free(hn, sizeof (*hn));
 
@@ -2565,17 +2591,17 @@ hook_notify_unregister(hook_notify_head_t *head,
  * what is being added or removed, as indicated by cmd.
  *
  * This function does not acquire or release any lock as it is required
- * that code calling it do so before hand.  The use of hook_notify_head_t
+ * that code calling it do so before hand.  The use of list_t
  * is protected by the use of flagwait_t in the structures that own this
  * list and with the use of the FWF_ADD/DEL_ACTIVE flags.
  */
 static void
-hook_notify_run(hook_notify_head_t *head, char *family, char *event,
+hook_notify_run(list_t *head, char *family, char *event,
     char *name, hook_notify_cmd_t cmd)
 {
 	hook_notify_t *hn;
 
-	TAILQ_FOREACH(hn, head, hn_entry) {
+	for (hn = list_head(head); hn != NULL; hn = list_next(head, hn)) {
 		(*hn->hn_func)(cmd, hn->hn_arg, family, event, name);
 	}
 }
