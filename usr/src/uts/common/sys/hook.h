@@ -30,7 +30,6 @@
 #ifndef _SYS_HOOK_H
 #define	_SYS_HOOK_H
 
-#include <sys/queue.h>
 #include <sys/netstack.h>
 
 #ifdef	__cplusplus
