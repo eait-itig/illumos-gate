@@ -525,7 +525,7 @@ conf_close(struct opts *opts)
 			(void) unlink(cuname);
 		if (tuname[0] != 0)
 			(void) unlink(tuname);
-		err(EF_JMP, "unsafe to update configuration file "
+		err(0, "unsafe to update configuration file "
 		    "or timestamps");
 	}
 
