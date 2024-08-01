@@ -4006,9 +4006,17 @@ lx_getsockopt_tcp(sonode_t *so, int optname, void *optval, socklen_t *optlen)
 
 			if (so->so_type != SOCK_STREAM)
 				goto out;
+			/* only TCP sockets have a conn_t with a conn_tcp */
+			if (so->so_family != AF_INET &&
+			    so->so_family != AF_INET6) {
+				goto out;
+			}
 
+			mutex_enter(&so->so_lock);
 			lx_tcp_info_t *ti = (lx_tcp_info_t *)optval;
 			conn_t *con = (struct conn_s *)so->so_proto_handle;
+			VERIFY(con != NULL);
+			mutex_enter(&con->conn_lock);
 			tcp_t *tp = con->conn_tcp;
 			ti->tcpi_state = STOL_TCPSTATE(tp->tcp_state);
 			/* tcp_rto is kept in msec, but the API needs usec. */
@@ -4025,6 +4033,8 @@ lx_getsockopt_tcp(sonode_t *so, int optname, void *optval, socklen_t *optlen)
 			ti->tcpi_unacked = tp->tcp_suna;
 			/* Current receive window */
 			ti->tcpi_rcv_space = tp->tcp_rwnd;
+			mutex_exit(&con->conn_lock);
+			mutex_exit(&so->so_lock);
 		}
 		goto out;
 
