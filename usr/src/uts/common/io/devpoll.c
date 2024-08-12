@@ -49,15 +49,13 @@
 #include <sys/resource.h>
 #include <sys/schedctl.h>
 #include <sys/epoll.h>
+#include <sys/id_space.h>
+#include <sys/ddi.h>
+#include <sys/sunddi.h>
 
-#define	RESERVED	1
-
-/* local data struct */
-static	dp_entry_t	**devpolltbl;	/* dev poll entries */
-static	size_t		dptblsize;
-
-static	kmutex_t	devpoll_lock;	/* lock protecting dev tbl */
 int			devpoll_init;	/* is /dev/poll initialized already */
+static	id_space_t	*devpoll_idspc;
+static	void		*devpoll_softc;
 
 /* device local functions */
 
@@ -159,12 +157,18 @@ _init()
 {
 	int	error;
 
-	dptblsize = DEVPOLLSIZE;
-	devpolltbl = kmem_zalloc(sizeof (caddr_t) * dptblsize, KM_SLEEP);
-	mutex_init(&devpoll_lock, NULL, MUTEX_DEFAULT, NULL);
+	devpoll_idspc = id_space_create("devpollminor", 0, MAXMIN);
+	if (devpoll_idspc == NULL)
+		return (ENOSPC);
+	error = ddi_soft_state_init(&devpoll_softc, sizeof (dp_entry_t),
+	    DEVPOLLSIZE);
+	if (error != DDI_SUCCESS) {
+		id_space_destroy(devpoll_idspc);
+		devpoll_idspc = NULL;
+		return (error);
+	}
 	devpoll_init = 1;
 	if ((error = mod_install(&modlinkage)) != 0) {
-		kmem_free(devpolltbl, sizeof (caddr_t) * dptblsize);
 		devpoll_init = 0;
 	}
 	return (error);
@@ -178,8 +182,10 @@ _fini()
 	if ((error = mod_remove(&modlinkage)) != 0) {
 		return (error);
 	}
-	mutex_destroy(&devpoll_lock);
-	kmem_free(devpolltbl, sizeof (caddr_t) * dptblsize);
+	ddi_soft_state_fini(&devpoll_softc);
+	id_space_destroy(devpoll_idspc);
+	devpoll_idspc = NULL;
+	devpoll_init = 0;
 	return (0);
 }
 
@@ -641,41 +647,17 @@ dpopen(dev_t *devp, int flag, int otyp, cred_t *credp)
 	minor_t		minordev;
 	dp_entry_t	*dpep;
 	pollcache_t	*pcp;
+	int		error;
 
 	ASSERT(devpoll_init);
-	ASSERT(dptblsize <= MAXMIN);
-	mutex_enter(&devpoll_lock);
-	for (minordev = 0; minordev < dptblsize; minordev++) {
-		if (devpolltbl[minordev] == NULL) {
-			devpolltbl[minordev] = (dp_entry_t *)RESERVED;
-			break;
-		}
-	}
-	if (minordev == dptblsize) {
-		dp_entry_t	**newtbl;
-		size_t		oldsize;
 
-		/*
-		 * Used up every entry in the existing devpoll table.
-		 * Grow the table by DEVPOLLSIZE.
-		 */
-		if ((oldsize = dptblsize) >= MAXMIN) {
-			mutex_exit(&devpoll_lock);
-			return (ENXIO);
-		}
-		dptblsize += DEVPOLLSIZE;
-		if (dptblsize > MAXMIN) {
-			dptblsize = MAXMIN;
-		}
-		newtbl = kmem_zalloc(sizeof (caddr_t) * dptblsize, KM_SLEEP);
-		bcopy(devpolltbl, newtbl, sizeof (caddr_t) * oldsize);
-		kmem_free(devpolltbl, sizeof (caddr_t) * oldsize);
-		devpolltbl = newtbl;
-		devpolltbl[minordev] = (dp_entry_t *)RESERVED;
-	}
-	mutex_exit(&devpoll_lock);
+	minordev = id_allocff(devpoll_idspc);
+	error = ddi_soft_state_zalloc(devpoll_softc, minordev);
+	if (error != DDI_SUCCESS)
+		return (ENXIO);
 
-	dpep = kmem_zalloc(sizeof (dp_entry_t), KM_SLEEP);
+	dpep = ddi_get_soft_state(devpoll_softc, minordev);
+
 	/*
 	 * allocate a pollcache skeleton here. Delay allocating bitmap
 	 * structures until dpwrite() time, since we don't know the
@@ -689,11 +671,7 @@ dpopen(dev_t *devp, int flag, int otyp, cred_t *credp)
 	dpep->dpe_pcache = pcp;
 	pcp->pc_pid = -1;
 	*devp = makedevice(getmajor(*devp), minordev);  /* clone the driver */
-	mutex_enter(&devpoll_lock);
-	ASSERT(minordev < dptblsize);
-	ASSERT(devpolltbl[minordev] == (dp_entry_t *)RESERVED);
-	devpolltbl[minordev] = dpep;
-	mutex_exit(&devpoll_lock);
+
 	return (0);
 }
 
@@ -719,11 +697,8 @@ dpwrite(dev_t dev, struct uio *uiop, cred_t *credp)
 
 	minor = getminor(dev);
 
-	mutex_enter(&devpoll_lock);
-	ASSERT(minor < dptblsize);
-	dpep = devpolltbl[minor];
+	dpep = ddi_get_soft_state(devpoll_softc, minor);
 	ASSERT(dpep != NULL);
-	mutex_exit(&devpoll_lock);
 
 	mutex_enter(&dpep->dpe_lock);
 	pcp = dpep->dpe_pcache;
@@ -1135,10 +1110,7 @@ dpioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp, int *rvalp)
 	}
 
 	minor = getminor(dev);
-	mutex_enter(&devpoll_lock);
-	ASSERT(minor < dptblsize);
-	dpep = devpolltbl[minor];
-	mutex_exit(&devpoll_lock);
+	dpep = ddi_get_soft_state(devpoll_softc, minor);
 	ASSERT(dpep != NULL);
 	pcp = dpep->dpe_pcache;
 
@@ -1543,11 +1515,8 @@ dppoll(dev_t dev, short events, int anyyet, short *reventsp,
 	int		res, rc = 0;
 
 	minor = getminor(dev);
-	mutex_enter(&devpoll_lock);
-	ASSERT(minor < dptblsize);
-	dpep = devpolltbl[minor];
+	dpep = ddi_get_soft_state(devpoll_softc, minor);
 	ASSERT(dpep != NULL);
-	mutex_exit(&devpoll_lock);
 
 	mutex_enter(&dpep->dpe_lock);
 	if ((dpep->dpe_flag & DP_ISEPOLLCOMPAT) == 0) {
@@ -1629,11 +1598,9 @@ dpclose(dev_t dev, int flag, int otyp, cred_t *credp)
 
 	minor = getminor(dev);
 
-	mutex_enter(&devpoll_lock);
-	dpep = devpolltbl[minor];
+	dpep = ddi_get_soft_state(devpoll_softc, minor);
 	ASSERT(dpep != NULL);
-	devpolltbl[minor] = NULL;
-	mutex_exit(&devpoll_lock);
+
 	pcp = dpep->dpe_pcache;
 	ASSERT(pcp != NULL);
 	/*
@@ -1671,7 +1638,9 @@ dpclose(dev_t dev, int flag, int otyp, cred_t *credp)
 
 	pcache_destroy(pcp);
 	ASSERT(dpep->dpe_refcnt == 0);
-	kmem_free(dpep, sizeof (dp_entry_t));
+
+	ddi_soft_state_free(devpoll_softc, minor);
+	id_free(devpoll_idspc, minor);
 	return (0);
 }
 
