@@ -166,56 +166,6 @@ cgrp_hash_lookup(char *name, cgrp_node_t *parent, cgrp_nodehold_t hold,
 }
 
 /*
- * The following functions maintain the per-mount cgroup hash table.
- */
-static void
-cgrp_cg_hash_insert(cgrp_mnt_t *cgm, cgrp_node_t *cn)
-{
-	uint_t cgid;
-	int hsh;
-
-	ASSERT(MUTEX_HELD(&cgm->cg_contents));
-
-	cgid = cn->cgn_id;
-	hsh = cgid % CGRP_HASH_SZ;
-
-	cn->cgn_next = cgm->cg_grp_hash[hsh];
-	cgm->cg_grp_hash[hsh] = cn;
-}
-
-static void
-cgrp_cg_hash_remove(cgrp_mnt_t *cgm, cgrp_node_t *cn)
-{
-	uint_t cgid;
-	int hsh;
-	cgrp_node_t *np = NULL, *curp, *prevp = NULL;
-
-	ASSERT(MUTEX_HELD(&cgm->cg_contents));
-
-	cgid = cn->cgn_id;
-	hsh = cgid % CGRP_HASH_SZ;
-
-	for (curp = cgm->cg_grp_hash[hsh]; curp != NULL;
-	    curp = curp->cgn_next) {
-		if (curp->cgn_id == cgid) {
-			if (prevp == NULL) {
-				cgm->cg_grp_hash[hsh] = curp->cgn_next;
-			} else {
-				prevp->cgn_next = curp->cgn_next;
-			}
-			np = curp;
-			np->cgn_next = NULL;
-			break;
-		}
-
-		prevp = curp;
-	}
-
-	ASSERT(np != NULL);
-	ASSERT(np->cgn_task_cnt == 0);
-}
-
-/*
  * Count up the number of threads already running in the zone and initialize the
  * first cgroup's task counter.
  *
@@ -228,11 +178,18 @@ cgrp_cg_hash_init(cgrp_node_t *cn)
 	int cnt = 0;
 	zoneid_t zoneid = curproc->p_zone->zone_id;
 	pid_t schedpid = curproc->p_zone->zone_zsched->p_pid;
+	cgrp_mnt_t *cgm = VTOCGM(cn->cgn_vnode);
+
+	ASSERT(RW_WRITE_HELD(&cgm->cg_contents));
+
+	/* let this go so we can take pidlock */
+	rw_exit(&cgm->cg_contents);
 
 	/* Scan all of the process entries */
 	mutex_enter(&pidlock);
 	for (i = 1; i < v.v_proc; i++) {
 		proc_t *p;
+		kthread_t *t;
 
 		/*
 		 * Skip indices for which there is no pid_entry, PIDs for
@@ -256,37 +213,29 @@ cgrp_cg_hash_init(cgrp_node_t *cn)
 			mutex_exit(&p->p_lock);
 			continue;
 		}
-		cnt += p->p_lwpcnt;
+		rw_enter(&cgm->cg_contents, RW_WRITER);
+		t = p->p_tlist;
+		do {
+			lx_lwp_data_t *lwpd = ttolxlwp(t);
+			if (lwpd != NULL) {
+				if (lwpd->br_cgroup != cn) {
+					VERIFY(lwpd->br_cgroup == NULL);
+					lwpd->br_cgroup = cn;
+					avl_add(&cn->cgn_lwps, lwpd);
+					VN_HOLD(cn->cgn_vnode);
+				}
+			}
+			t = t->t_forw;
+		} while (t != p->p_tlist);
+		rw_exit(&cgm->cg_contents);
 		mutex_exit(&p->p_lock);
 	}
-
-	/*
-	 * There should be at least the init process with 1 thread in the zone
-	 */
-	ASSERT(cnt > 0);
-	cn->cgn_task_cnt = cnt;
 
 	DTRACE_PROBE2(cgrp__grp__init, void *, cn, int, cnt);
 
 	mutex_exit(&pidlock);
-}
 
-cgrp_node_t *
-cgrp_cg_hash_lookup(cgrp_mnt_t *cgm, uint_t cgid)
-{
-	int hsh = cgid % CGRP_HASH_SZ;
-	cgrp_node_t *curp;
-
-	ASSERT(MUTEX_HELD(&cgm->cg_contents));
-
-	for (curp = cgm->cg_grp_hash[hsh]; curp != NULL;
-	    curp = curp->cgn_next) {
-		if (curp->cgn_id == cgid) {
-			return (curp);
-		}
-	}
-
-	return (NULL);
+	rw_enter(&cgm->cg_contents, RW_WRITER);
 }
 
 /*
@@ -351,7 +300,7 @@ cgrp_dirlookup(cgrp_node_t *parent, char *name, cgrp_node_t **foundcp,
 {
 	int error;
 
-	ASSERT(MUTEX_HELD(&VTOCGM(parent->cgn_vnode)->cg_contents));
+	ASSERT(RW_LOCK_HELD(&VTOCGM(parent->cgn_vnode)->cg_contents));
 	*foundcp = NULL;
 	if (parent->cgn_type != CG_CGROUP_DIR)
 		return (ENOTDIR);
@@ -402,7 +351,7 @@ cgrp_direnter(
 	int error = 0;
 	char *s;
 
-	ASSERT(MUTEX_HELD(&cgm->cg_contents));
+	ASSERT(RW_WRITE_HELD(&cgm->cg_contents));
 	ASSERT(dir->cgn_type == CG_CGROUP_DIR);
 
 	/*
@@ -453,9 +402,9 @@ cgrp_direnter(
 	if (cdp) {
 		ASSERT(found != NULL);
 		error = EEXIST;
-		mutex_exit(&cgm->cg_contents);
+		rw_exit(&cgm->cg_contents);
 		cgnode_rele(found);
-		mutex_enter(&cgm->cg_contents);
+		rw_enter(&cgm->cg_contents, RW_WRITER);
 	} else {
 
 		/*
@@ -495,17 +444,17 @@ cgrp_direnter(
 				}
 				cn->cgn_nlink = 0;
 				gethrestime(&cn->cgn_ctime);
-				mutex_exit(&cgm->cg_contents);
+				rw_exit(&cgm->cg_contents);
 				cgnode_rele(cn);
-				mutex_enter(&cgm->cg_contents);
+				rw_enter(&cgm->cg_contents, RW_WRITER);
 				cn = NULL;
 			}
 		} else if (cnp) {
 			*cnp = cn;
 		} else if (op == DE_CREATE || op == DE_MKDIR) {
-			mutex_exit(&cgm->cg_contents);
+			rw_exit(&cgm->cg_contents);
 			cgnode_rele(cn);
-			mutex_enter(&cgm->cg_contents);
+			rw_enter(&cgm->cg_contents, RW_WRITER);
 		}
 	}
 
@@ -537,7 +486,7 @@ cgrp_dirdelete(cgrp_node_t *dir, cgrp_node_t *cn, char *nm, enum dr_op op,
 	cgrp_node_t *cnnp;
 	timestruc_t now;
 
-	ASSERT(MUTEX_HELD(&cgm->cg_contents));
+	ASSERT(RW_WRITE_HELD(&cgm->cg_contents));
 
 	if (nm[0] == '\0')
 		panic("cgrp_dirdelete: empty name for 0x%p", (void *)cn);
@@ -587,16 +536,14 @@ cgrp_dirdelete(cgrp_node_t *dir, cgrp_node_t *cn, char *nm, enum dr_op op,
 			cgnode_hold(pseudo_node);
 			error = cgrp_dirdelete(cn, pseudo_node,
 			    cdp->cgd_name, DR_REMOVE, cred);
-			mutex_exit(&cgm->cg_contents);
+			rw_exit(&cgm->cg_contents);
 			cgnode_rele(pseudo_node);
 			if (error != 0)
 				return (error);
-			mutex_enter(&cgm->cg_contents);
+			rw_enter(&cgm->cg_contents, RW_WRITER);
 
 			cdp = nextp;
 		}
-
-		cgrp_cg_hash_remove(cgm, cn);
 	}
 
 	cndp = cgrp_hash_lookup(nm, dir, NOHOLD, &cnnp);
@@ -653,6 +600,22 @@ cgrp_dirdelete(cgrp_node_t *dir, cgrp_node_t *cn, char *nm, enum dr_op op,
 	return (0);
 }
 
+static int
+cgrp_lwp_avl_compare(const void *av, const void *bv)
+{
+	const lx_lwp_data_t *a = av;
+	const lx_lwp_data_t *b = bv;
+	if (a->br_lwp->lwp_procp < b->br_lwp->lwp_procp)
+		return (-1);
+	if (a->br_lwp->lwp_procp > b->br_lwp->lwp_procp)
+		return (1);
+	if (a->br_lwp < b->br_lwp)
+		return (-1);
+	if (a->br_lwp > b->br_lwp)
+		return (1);
+	return (0);
+}
+
 /*
  * Initialize a cgrp_node and add it to file list under mount point.
  */
@@ -662,7 +625,7 @@ cgrp_node_init(cgrp_mnt_t *cgm, cgrp_node_t *cn, vattr_t *vap, cred_t *cred)
 	struct vnode *vp;
 	timestruc_t now;
 
-	ASSERT(MUTEX_HELD(&cgm->cg_contents));
+	ASSERT(RW_WRITE_HELD(&cgm->cg_contents));
 	ASSERT(vap != NULL);
 
 	cn->cgn_mode = MAKEIMODE(vap->va_type, vap->va_mode);
@@ -700,6 +663,9 @@ cgrp_node_init(cgrp_mnt_t *cgm, cgrp_node_t *cn, vattr_t *vap, cred_t *cred)
 
 	cn->cgn_nodeid = cgm->cg_gen++;
 
+	avl_create(&cn->cgn_lwps, cgrp_lwp_avl_compare, sizeof (lx_lwp_data_t),
+	    offsetof(lx_lwp_data_t, br_cgroup_node));
+
 	/*
 	 * Add new cgrp_node to end of linked list of cgrp_nodes for this
 	 * cgroup fs. Root directory is handled specially in cgrp_mount.
@@ -718,7 +684,7 @@ cgrp_addnode(cgrp_mnt_t *cgm, cgrp_node_t *dir, char *name,
 {
 	cgrp_node_t *ncn;
 
-	ASSERT(MUTEX_HELD(&cgm->cg_contents));
+	ASSERT(RW_WRITE_HELD(&cgm->cg_contents));
 
 	VERIFY0(cgrp_direnter(cgm, dir, name, DE_CREATE, (cgrp_node_t *)NULL,
 	    nattr, &ncn, cr));
@@ -736,9 +702,9 @@ cgrp_addnode(cgrp_mnt_t *cgm, cgrp_node_t *dir, char *name,
 	 * come out of cgrp_inactive but we won't reclaim the vnode
 	 * there since the cgn_nlink value will still be 1.
 	 */
-	mutex_exit(&cgm->cg_contents);
+	rw_exit(&cgm->cg_contents);
 	cgnode_rele(ncn);
-	mutex_enter(&cgm->cg_contents);
+	rw_enter(&cgm->cg_contents, RW_WRITER);
 }
 
 /*
@@ -758,7 +724,7 @@ cgrp_dirinit(cgrp_node_t *parent, cgrp_node_t *dir, cred_t *cr)
 	struct vattr nattr;
 	int i;
 
-	ASSERT(MUTEX_HELD(&cgm->cg_contents));
+	ASSERT(RW_WRITE_HELD(&cgm->cg_contents));
 	ASSERT(dir->cgn_type == CG_CGROUP_DIR);
 
 	ASSERT(cgm->cg_ssid > 0 && cgm->cg_ssid < CG_SSID_NUM);
@@ -774,7 +740,6 @@ cgrp_dirinit(cgrp_node_t *parent, cgrp_node_t *dir, cred_t *cr)
 	 * mount.
 	 */
 	dir->cgn_id = cgm->cg_grp_gen++;
-	cgrp_cg_hash_insert(cgm, dir);
 	/* Initialise the first cgroup if this is top-level group */
 	if (parent == dir)
 		cgrp_cg_hash_init(dir);
@@ -850,7 +815,7 @@ cgrp_dirtrunc(cgrp_node_t *dir)
 	cgrp_dirent_t *cgdp;
 	timestruc_t now;
 
-	ASSERT(MUTEX_HELD(&VTOCGM(dir->cgn_vnode)->cg_contents));
+	ASSERT(RW_WRITE_HELD(&VTOCGM(dir->cgn_vnode)->cg_contents));
 	ASSERT(dir->cgn_type == CG_CGROUP_DIR);
 
 	for (cgdp = dir->cgn_dir; cgdp; cgdp = dir->cgn_dir) {
@@ -993,7 +958,7 @@ cgrp_dirmakecgnode(cgrp_node_t *dir, cgrp_mnt_t *cgm, struct vattr *va,
 {
 	cgrp_node_t *cn;
 
-	ASSERT(MUTEX_HELD(&cgm->cg_contents));
+	ASSERT(RW_WRITE_HELD(&cgm->cg_contents));
 	ASSERT(va != NULL);
 
 	if (((va->va_mask & AT_ATIME) && TIMESPEC_OVERFLOW(&va->va_atime)) ||
