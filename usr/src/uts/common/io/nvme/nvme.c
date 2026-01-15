@@ -2742,6 +2742,7 @@ nvme_wait_cmd(nvme_cmd_t *cmd, uint32_t sec)
 {
 	nvme_t *nvme = cmd->nc_nvme;
 	nvme_reg_csts_t csts;
+	int ccnt;
 
 	ASSERT(mutex_owned(&cmd->nc_mutex));
 
@@ -2795,6 +2796,25 @@ nvme_wait_cmd(nvme_cmd_t *cmd, uint32_t sec)
 		nvme_ctrl_mark_dead(cmd->nc_nvme, B_FALSE);
 		nvme_lost_cmd(nvme, cmd);
 		return;
+	}
+
+	/*
+	 * Poll admin completion queue to see if we missed an interrupt. Some
+	 * buggy controller firmwares have done this, especially on the first
+	 * admin command :(
+	 */
+	mutex_exit(&cmd->nc_mutex);
+	ccnt = nvme_process_iocq(nvme, nvme->n_adminq->nq_cq);
+	mutex_enter(&cmd->nc_mutex);
+	if (ccnt > 0) {
+		dev_err(nvme->n_dip, CE_WARN, "!possible missed interrupt "
+		    "(%d completions found on admin CQ at timeout)", ccnt);
+		if (cmd->nc_state == NVME_CMD_COMPLETED) {
+			DTRACE_PROBE1(nvme_admin_cmd_completed, nvme_cmd_t *,
+			    cmd);
+			nvme_admin_stat_cmd(nvme, cmd);
+			return;
+		}
 	}
 
 	/* Issue an abort for the command that has timed out */
