@@ -2058,6 +2058,11 @@ taskq_d_svc_bucket(taskq_ent_t *tqe,
 			 */
 			if (tqe->tqent_func == taskq_d_redirect) {
 				bucket->tqbucket_nalloc--;
+				/*
+				 * taskq_wait() waits for nalloc to drop to
+				 * zero on tqbucket_cv.
+				*/
+				cv_signal(&bucket->tqbucket_cv);
 				goto unlock_out;
 			}
 
@@ -2096,6 +2101,12 @@ taskq_d_svc_bucket(taskq_ent_t *tqe,
 			bltqe = bucket->tqbucket_backlog.tqent_next;
 			TQ_REMOVE(bltqe);
 			bucket->tqbucket_nbacklog--;
+
+			/*
+			 * taskq_wait() waits for nbacklog to drop to zero on
+			 * tqbucket_cv.
+			*/
+			cv_signal(&bucket->tqbucket_cv);
 
 			DTRACE_PROBE2(taskq__x__backlog,
 			    taskq_bucket_t *, bucket,
