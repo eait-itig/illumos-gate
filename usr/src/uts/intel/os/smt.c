@@ -156,7 +156,7 @@ static uint_t empty_pil = XC_CPUPOKE_PIL;
  * vulnerable to L1TF if hyper-threading is enabled, and we don't have the "not
  * vulnerable" CPUID bit.
  */
-int smt_exclusion = 1;
+int smt_exclusion = 0;
 
 /*
  * How long smt_acquire() will spin trying to acquire the core, in
