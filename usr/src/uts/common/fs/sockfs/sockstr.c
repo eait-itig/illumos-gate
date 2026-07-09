@@ -2192,7 +2192,7 @@ strsock_proto(vnode_t *vp, mblk_t *mp,
 			 */
 			*wakeups = WSLEEP;
 			*allmsgsigs = S_OUTPUT;
-			*pollwakeups = POLLOUT;
+			*pollwakeups = POLLOUT | POLLERR | POLLHUP;
 			return (NULL);
 		}
 		addr = sogetoff(mp, conn_con->RES_offset, addrlen, 1);
@@ -2212,7 +2212,7 @@ strsock_proto(vnode_t *vp, mblk_t *mp,
 			 */
 			*wakeups = WSLEEP;
 			*allmsgsigs = S_OUTPUT;
-			*pollwakeups = POLLOUT;
+			*pollwakeups = POLLOUT | POLLHUP | POLLERR;
 			return (NULL);
 		}
 
