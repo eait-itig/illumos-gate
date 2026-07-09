@@ -123,23 +123,27 @@ static hment_t *hment_steal(void);
  * is entirely arbitrary and is just so that the AVL algorithm works.
  */
 static int
-hment_compare(const void *hm1, const void *hm2)
+hment_compare(const void *a, const void *b)
 {
-	hment_t *h1 = (hment_t *)hm1;
-	hment_t *h2 = (hment_t *)hm2;
-	long diff;
+	const hment_t *h1 = a;
+	const hment_t *h2 = b;
 
-	diff = (uintptr_t)h1->hm_htable - (uintptr_t)h2->hm_htable;
-	if (diff == 0) {
-		diff = h1->hm_entry - h2->hm_entry;
-		if (diff == 0)
-			diff = h1->hm_pfn - h2->hm_pfn;
-	}
-	if (diff < 0)
-		diff = -1;
-	else if (diff > 0)
-		diff = 1;
-	return (diff);
+	if ((uintptr_t)h1->hm_htable < (uintptr_t)h2->hm_htable)
+		return (-1);
+	if ((uintptr_t)h1->hm_htable > (uintptr_t)h2->hm_htable)
+		return (1);
+
+	if (h1->hm_entry < h2->hm_entry)
+		return (-1);
+	if (h1->hm_entry > h2->hm_entry)
+		return (1);
+
+	if (h1->hm_pfn < h2->hm_pfn)
+		return (-1);
+	if (h1->hm_pfn > h2->hm_pfn)
+		return (1);
+
+	return (0);
 }
 
 /*
