@@ -136,7 +136,7 @@ uint64_t zfs_delay_scale = 1000 * 1000 * 1000 / 2000;
 /*
  * This determines the number of threads used by the dp_sync_taskq.
  */
-int zfs_sync_taskq_batch_pct = 75;
+int zfs_sync_taskq_batch_pct = 150;
 
 /*
  * These tunables determine the behavior of how zil_itxg_clean() is
@@ -208,8 +208,8 @@ dsl_pool_open_impl(spa_t *spa, uint64_t txg)
 	    offsetof(dsl_sync_task_t, dst_node));
 
 	dp->dp_sync_taskq = taskq_create("dp_sync_taskq",
-	    zfs_sync_taskq_batch_pct, minclsyspri, 1, INT_MAX,
-	    TASKQ_THREADS_CPU_PCT);
+	    (max_ncpus * zfs_sync_taskq_batch_pct) / 100, minclsyspri,
+	    max_ncpus, INT_MAX, TASKQ_PREPOPULATE | TASKQ_DYNAMIC);
 
 	dp->dp_zil_clean_taskq = taskq_create("dp_zil_clean_taskq",
 	    zfs_zil_clean_taskq_nthr_pct, minclsyspri,
