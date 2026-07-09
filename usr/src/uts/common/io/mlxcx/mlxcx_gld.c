@@ -531,8 +531,12 @@ mlxcx_mac_ring_tx(void *arg, mblk_t *mp)
 	mac_hcksum_get(mp, NULL, NULL, NULL, NULL, &ctx.mtc_chkflags);
 	mac_lso_get(mp, &ctx.mtc_mss, &ctx.mtc_lsoflags);
 
-	if (mac_ether_offload_info(mp, &meoi) != 0 ||
-	    (meoi.meoi_flags & MEOI_L2INFO_SET) == 0) {
+	/*
+	 * This can often return error in cases where we actually have
+	 * some subset of valid headers (e.g. on IP fragments)
+	 */
+	(void) mac_ether_offload_info(mp, &meoi);
+	if ((meoi.meoi_flags & MEOI_L2INFO_SET) == 0) {
 		/*
 		 * We got given a frame without a valid L2 header on it. We
 		 * can't really transmit that (mlx parts don't like it), so
