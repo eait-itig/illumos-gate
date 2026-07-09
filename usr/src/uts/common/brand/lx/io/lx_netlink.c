@@ -302,6 +302,7 @@
  */
 #define	LX_AUDIT_GET		1000	/* get audit system status */
 #define	LX_AUDIT_SET		1001	/* set audit system status */
+#define	LX_AUDIT_USER		1005
 #define	LX_AUDIT_WATCH_INS	1007	/* insert file watch */
 #define	LX_AUDIT_WATCH_REM	1008	/* remove file watch */
 #define	LX_AUDIT_WATCH_LIST	1009	/* list file watchs */
@@ -862,11 +863,35 @@ lx_netlink_reply_sendup(lx_netlink_reply_t *reply, mblk_t *mp, mblk_t *mp1)
 	 */
 	mp1->b_cont = mp;
 
+	/*
+	 * If the socket is currently flow-controlled, do not allow further
+	 * data to be sent out.
+	 */
+	mutex_enter(&lxsock->lxns_flowctl_mtx);
+	if (lxsock->lxns_flowctrled) {
+		mutex_exit(&lxsock->lxns_flowctl_mtx);
+		freemsg(mp1);
+		return;
+	}
+
 	lxsock->lxns_upcalls->su_recv(lxsock->lxns_uphandle, mp1,
 	    msgdsize(mp1), 0, &error, NULL);
 
-	if (error != 0)
+	/*
+	 * The socket indicated that it is now flow-controlled.  That said, it
+	 * still queued the last message, so indicated success (but track the
+	 * flow-controlled state).
+	 */
+	if (error == ENOSPC) {
+		lxsock->lxns_flowctrled = B_TRUE;
 		lx_netlink_flowctrld++;
+		error = 0;
+	}
+	mutex_exit(&lxsock->lxns_flowctl_mtx);
+
+	if (error != 0) {
+		/* XXX: maybe print an error to dmesg? idk */
+	}
 }
 
 static void
@@ -886,66 +911,92 @@ lx_netlink_reply_send(lx_netlink_reply_t *reply)
 	reply->lxnr_mp = NULL;
 }
 
+/*
+ * Reply with an NLMSG_ERROR, even if errno is 0. This is used by several
+ * audit functions where Linux libaudit refuses to correctly handle our usual
+ * multi-part replies (with NLM_F_MULTI set).
+ *
+ * lx_netlink_au_um also calls this to generate an ACK message.
+ */
 static void
-lx_netlink_reply_done(lx_netlink_reply_t *reply)
+lx_netlink_reply_error_done(lx_netlink_reply_t *reply)
 {
 	lx_netlink_sock_t *lxsock = reply->lxnr_sock;
 	mblk_t *mp;
+	lx_netlink_hdr_t *hdr;
+	lx_netlink_err_t *err;
 
 	/*
 	 * Denote that we're done via a message with a NULL payload.
 	 */
 	lx_netlink_reply_msg(reply, NULL, 0);
 
-	if (reply->lxnr_errno) {
-		/*
-		 * If anything failed, we'll send up an error message.
-		 */
-		lx_netlink_hdr_t *hdr;
-		lx_netlink_err_t *err;
-
-		if (reply->lxnr_mp != NULL) {
-			freeb(reply->lxnr_mp);
-			reply->lxnr_mp = NULL;
-		}
-
-		mp = reply->lxnr_err;
-		VERIFY(mp != NULL);
-		reply->lxnr_err = NULL;
-		err = (lx_netlink_err_t *)mp->b_rptr;
-		hdr = &err->lxne_hdr;
-		mp->b_wptr += sizeof (lx_netlink_err_t);
-
-		err->lxne_failed = reply->lxnr_hdr;
-		err->lxne_errno = reply->lxnr_errno;
-		hdr->lxnh_type = LX_NETLINK_NLMSG_ERROR;
-		hdr->lxnh_seq = reply->lxnr_hdr.lxnh_seq;
-		hdr->lxnh_len = sizeof (lx_netlink_err_t);
-		hdr->lxnh_seq = reply->lxnr_hdr.lxnh_seq;
-		hdr->lxnh_pid = lxsock->lxns_port;
-		hdr->lxnh_flags = 0;
-	} else {
-		uint32_t status = 0;
-
-		/*
-		 * More recent versions of the iproute2 utils expect a status
-		 * value after the header, even in the absence of errors.
-		 */
-		lx_netlink_reply_add(reply, &status, sizeof (status));
-
-		/*
-		 * "done" is also the most minimal response possible.  If
-		 * lx_netlink_reply_msg() does not set lxnr_errno, we should
-		 * be guaranteed enough room to hold this (i.e. our
-		 * lx_netlink_reply_add() call should never end up setting
-		 * lxnr_errno).
-		 */
-		VERIFY0(reply->lxnr_errno);
-
-		mp = reply->lxnr_mp;
-		VERIFY(mp != NULL);
+	if (reply->lxnr_mp != NULL) {
+		freeb(reply->lxnr_mp);
 		reply->lxnr_mp = NULL;
 	}
+
+	mp = reply->lxnr_err;
+	VERIFY(mp != NULL);
+	reply->lxnr_err = NULL;
+	err = (lx_netlink_err_t *)mp->b_rptr;
+	hdr = &err->lxne_hdr;
+	mp->b_wptr += sizeof (lx_netlink_err_t);
+
+	err->lxne_failed = reply->lxnr_hdr;
+	err->lxne_errno = reply->lxnr_errno;
+	hdr->lxnh_type = LX_NETLINK_NLMSG_ERROR;
+	hdr->lxnh_seq = reply->lxnr_hdr.lxnh_seq;
+	hdr->lxnh_len = sizeof (lx_netlink_err_t);
+	hdr->lxnh_seq = reply->lxnr_hdr.lxnh_seq;
+	hdr->lxnh_pid = lxsock->lxns_port;
+	hdr->lxnh_flags = 0;
+
+	lx_netlink_reply_sendup(reply, mp, reply->lxnr_mp1);
+
+	if (reply->lxnr_mp != NULL)
+		freeb(reply->lxnr_mp);
+
+	if (reply->lxnr_err != NULL)
+		freeb(reply->lxnr_err);
+
+	kmem_free(reply, sizeof (lx_netlink_reply_t));
+}
+
+static void
+lx_netlink_reply_done(lx_netlink_reply_t *reply)
+{
+	mblk_t *mp;
+	uint32_t status = 0;
+
+	if (reply->lxnr_errno) {
+		lx_netlink_reply_error_done(reply);
+		return;
+	}
+
+	/*
+	 * Denote that we're done via a message with a NULL payload.
+	 */
+	lx_netlink_reply_msg(reply, NULL, 0);
+
+	/*
+	 * More recent versions of the iproute2 utils expect a status
+	 * value after the header, even in the absence of errors.
+	 */
+	lx_netlink_reply_add(reply, &status, sizeof (status));
+
+	/*
+	 * "done" is also the most minimal response possible.  If
+	 * lx_netlink_reply_msg() does not set lxnr_errno, we should
+	 * be guaranteed enough room to hold this (i.e. our
+	 * lx_netlink_reply_add() call should never end up setting
+	 * lxnr_errno).
+	 */
+	VERIFY0(reply->lxnr_errno);
+
+	mp = reply->lxnr_mp;
+	VERIFY(mp != NULL);
+	reply->lxnr_mp = NULL;
 
 	lx_netlink_reply_sendup(reply, mp, reply->lxnr_mp1);
 
@@ -972,7 +1023,7 @@ lx_netlink_reply_error(lx_netlink_sock_t *lxsock,
 		return (ENOMEM);
 
 	reply->lxnr_errno = errno;
-	lx_netlink_reply_done(reply);
+	lx_netlink_reply_error_done(reply);
 
 	return (0);
 }
@@ -1642,7 +1693,7 @@ lx_netlink_au_set(lx_netlink_sock_t *lxsock, lx_netlink_hdr_t *hdr, mblk_t *mp)
 	if (reply == NULL)
 		return (ENOMEM);
 
-	lx_netlink_reply_done(reply);
+	lx_netlink_reply_error_done(reply);
 	return (0);
 }
 
@@ -1676,7 +1727,7 @@ lx_netlink_au_ar(lx_netlink_sock_t *lxsock, lx_netlink_hdr_t *hdr, mblk_t *mp)
 	if (reply == NULL)
 		return (ENOMEM);
 
-	lx_netlink_reply_done(reply);
+	lx_netlink_reply_error_done(reply);
 	return (0);
 }
 
@@ -1710,7 +1761,7 @@ lx_netlink_au_dr(lx_netlink_sock_t *lxsock, lx_netlink_hdr_t *hdr, mblk_t *mp)
 	if (reply == NULL)
 		return (ENOMEM);
 
-	lx_netlink_reply_done(reply);
+	lx_netlink_reply_error_done(reply);
 	return (0);
 }
 
@@ -1793,7 +1844,7 @@ lx_netlink_au_um(lx_netlink_sock_t *lxsock, lx_netlink_hdr_t *hdr, mblk_t *mp)
 		if (reply == NULL)
 			return (ENOMEM);
 
-		lx_netlink_reply_done(reply);
+		lx_netlink_reply_error_done(reply);
 	}
 	return (0);
 }
@@ -1906,7 +1957,8 @@ lx_netlink_audit(lx_netlink_sock_t *lxsock, lx_netlink_hdr_t *hdr, mblk_t *mp)
 	 * }
 	 */
 
-	if (hdr->lxnh_type >= LX_AUDIT_USER_MSG_START) {
+	if (hdr->lxnh_type == LX_AUDIT_USER ||
+	    hdr->lxnh_type >= LX_AUDIT_USER_MSG_START) {
 		return (lx_netlink_au_um(lxsock, hdr, mp));
 	}
 
