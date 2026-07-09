@@ -1054,7 +1054,7 @@ tl_attach(dev_info_t *devi, ddi_attach_cmd_t cmd)
 	}
 
 	tl_minors = id_space_create("tl_minor_space",
-	    TL_MINOR_START, MAXMIN32 - TL_MINOR_START + 1);
+	    TL_MINOR_START, MAXMIN - TL_MINOR_START + 1);
 
 	/*
 	 * Create ID space for minor numbers
@@ -4205,10 +4205,15 @@ tl_discon_req(mblk_t *mp, tl_endpt_t *tep)
 	/* Commit state changes */
 	tep->te_state = new_state;
 
-	if (peer_tep == NULL) {
+	/*
+	 * If there's no peer, or we don't need to send them the T_DISCON_IND,
+	 * then we're done.
+	 */
+	if (peer_tep == NULL || dimp == NULL) {
 		ASSERT(dimp == NULL);
 		goto done;
 	}
+
 	/*
 	 * Flush queues on peer before sending up
 	 * T_DISCON_IND according to TPI
