@@ -8098,7 +8098,7 @@ strseteof(vnode_t *vp, int eof)
 	}
 
 	mutex_exit(&stp->sd_lock);
-	pollwakeup(&stp->sd_pollist, POLLIN|POLLRDNORM);
+	pollwakeup(&stp->sd_pollist, POLLIN|POLLRDNORM|POLLHUP|POLLRDHUP);
 	mutex_enter(&stp->sd_lock);
 
 	if (stp->sd_sigflags & (S_INPUT|S_RDNORM))
