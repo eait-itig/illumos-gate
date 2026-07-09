@@ -188,6 +188,12 @@ struct net_instance_s {
 };
 typedef struct net_instance_s net_instance_t;
 
+struct net_instance_int_s;
+struct nini_head_s;
+typedef struct net_instance_int_s net_instance_int_t;
+typedef struct nini_head_s nini_head_t;
+
+#if defined(_KERNEL)
 struct net_instance_int_s {
 	LIST_ENTRY(net_instance_int_s)	nini_next;
 	uint_t				nini_ref;
@@ -199,9 +205,10 @@ struct net_instance_int_s {
 	kcondvar_t			nini_cv;
 	boolean_t			nini_condemned;
 };
-typedef struct net_instance_int_s net_instance_int_t;
 LIST_HEAD(nini_head_s, net_instance_int_s);
-typedef struct nini_head_s nini_head_t;
+#endif	/* _KERNEL */
+
+
 
 #define	nini_version	nini_instance->nin_version
 #define	nini_name	nini_instance->nin_name
@@ -209,6 +216,12 @@ typedef struct nini_head_s nini_head_t;
 #define	nini_destroy	nini_instance->nin_destroy
 #define	nini_shutdown	nini_instance->nin_shutdown
 
+struct neti_stack_s;
+struct neti_stack_head_s;
+typedef struct neti_stack_s neti_stack_t;
+typedef struct neti_stack_head_s neti_stack_head_t;
+
+#if defined(_KERNEL)
 /*
  * netinfo stack instances
  */
@@ -225,9 +238,8 @@ struct neti_stack_s {
 	/* list of net_handle_t */
 	LIST_HEAD(netd_listhead, net_data) nts_netd_head;
 };
-typedef struct neti_stack_s neti_stack_t;
 LIST_HEAD(neti_stack_head_s, neti_stack_s);
-typedef struct neti_stack_head_s neti_stack_head_t;
+#endif	/* _KERNEL */
 
 /*
  * Internal functions that need to be exported within the module.
