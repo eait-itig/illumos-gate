@@ -158,8 +158,8 @@ extern void *__builtin_alloca(size_t);
 
 typedef ulong_t lx_aio_context_t;
 
-uint_t	lx_aio_base_workers = 16;	/* num threads/context before scaling */
-uint_t	lx_aio_max_workers = 32;	/* upper limit on threads/context */
+uint_t	lx_aio_base_workers = 10;	/* num threads/context before scaling */
+uint_t	lx_aio_max_workers = 16;	/* upper limit on threads/context */
 
 /*
  * Internal representation of an aio context.
