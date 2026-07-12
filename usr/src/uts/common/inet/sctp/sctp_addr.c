@@ -701,6 +701,9 @@ sctp_update_ill(ill_t *ill, int op)
 	netstack_t	*ns = ill->ill_ipst->ips_netstack;
 	sctp_stack_t	*sctps = ns->netstack_sctp;
 
+	if (sctp_disable)
+		return;
+
 	rw_enter(&sctps->sctps_g_ills_lock, RW_WRITER);
 
 	index = SCTP_ILL_HASH_FN(SCTP_ILL_TO_PHYINDEX(ill));
@@ -837,6 +840,9 @@ sctp_move_ipif(ipif_t *ipif, ill_t *f_ill, ill_t *t_ill)
 	int		i;
 	netstack_t	*ns = ipif->ipif_ill->ill_ipst->ips_netstack;
 	sctp_stack_t	*sctps = ns->netstack_sctp;
+
+	if (sctp_disable)
+		return;
 
 	rw_enter(&sctps->sctps_g_ills_lock, RW_READER);
 	rw_enter(&sctps->sctps_g_ipifs_lock, RW_READER);
@@ -1014,6 +1020,9 @@ sctp_update_ipif_addr(ipif_t *ipif, in6_addr_t v6addr)
 	int		hindex;
 	sctp_stack_t	*sctps;
 
+	if (sctp_disable)
+		return;
+
 	sctps = ipif->ipif_ill->ill_ipst->ips_netstack->netstack_sctp;
 
 	/* Index for new address */
@@ -1148,6 +1157,9 @@ sctp_update_ipif(ipif_t *ipif, int op)
 	uint_t		hindex;
 	netstack_t	*ns = ipif->ipif_ill->ill_ipst->ips_netstack;
 	sctp_stack_t	*sctps = ns->netstack_sctp;
+
+	if (sctp_disable)
+		return;
 
 	ip2dbg(("sctp_update_ipif: %s %d\n", ill->ill_name, ipif->ipif_seqid));
 

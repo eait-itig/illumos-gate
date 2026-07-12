@@ -32,6 +32,8 @@ extern "C" {
 #include <netinet/sctp.h>
 #include <inet/sctp/sctp_stack.h>
 
+extern int sctp_disable;
+
 #define	SCTP_COMMON_HDR_LENGTH	12	/* SCTP common header length */
 
 /* SCTP routines for IP to call. */

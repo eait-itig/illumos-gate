@@ -9770,7 +9770,8 @@ ip_snmp_get(queue_t *q, mblk_t *mpctl, int level, boolean_t legacy_req)
 	if (mpctl == NULL)
 		return (1);
 
-	if ((mpctl = sctp_snmp_get_mib2(q, mpctl, sctps)) == NULL) {
+	if (!sctp_disable &&
+	    (mpctl = sctp_snmp_get_mib2(q, mpctl, sctps)) == NULL) {
 		return (1);
 	}
 	if ((mpctl = ip_snmp_get_mib2_ip_dce(q, mpctl, ipst)) == NULL) {
@@ -14367,6 +14368,13 @@ ip_fanout_sctp_raw(mblk_t *mp, ipha_t *ipha, ip6_t *ip6h, uint32_t ports,
 	ill_t		*rill = ira->ira_rill;
 
 	secure = iraflags & IRAF_IPSEC_SECURE;
+
+	if (sctp_disable) {
+		BUMP_MIB(ill->ill_ip_mib, ipIfStatsInDiscards);
+		ip_drop_input("ipIfStatsInDiscards", mp, ill);
+		freemsg(mp);
+		return;
+	}
 
 	connp = ipcl_classify_raw(mp, IPPROTO_SCTP, ports, ipha, ip6h,
 	    ira, ipst);

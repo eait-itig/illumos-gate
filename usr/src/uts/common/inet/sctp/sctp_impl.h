@@ -968,6 +968,8 @@ typedef struct sctp_s {
 		    B_FALSE);					\
 	}
 
+extern int sctp_disable;
+
 #endif	/* (defined(_KERNEL) || defined(_KMEMUSER)) */
 
 extern void	sctp_ack_timer(sctp_t *);

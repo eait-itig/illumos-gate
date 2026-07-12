@@ -313,8 +313,11 @@ mod_get_allprop(netstack_t *stack, mod_prop_info_t *pinfo, const char *ifname,
 		ptbl = stack->netstack_udp->us_propinfo_tbl;
 		break;
 	case MOD_PROTO_SCTP:
-		ptbl = stack->netstack_sctp->sctps_propinfo_tbl;
-		break;
+		if (!sctp_disable) {
+			ptbl = stack->netstack_sctp->sctps_propinfo_tbl;
+			break;
+		}
+		/* FALLTHROUGH */
 	default:
 		return (EINVAL);
 	}

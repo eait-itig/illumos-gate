@@ -8893,8 +8893,11 @@ ip_sioctl_getsetprop(queue_t *q, mblk_t *mp)
 		ptbl = stack->netstack_udp->us_propinfo_tbl;
 		break;
 	case MOD_PROTO_SCTP:
-		ptbl = stack->netstack_sctp->sctps_propinfo_tbl;
-		break;
+		if (!sctp_disable) {
+			ptbl = stack->netstack_sctp->sctps_propinfo_tbl;
+			break;
+		}
+		/* FALLTHROUGH */
 	default:
 		miocnak(q, mp, 0, EINVAL);
 		return;

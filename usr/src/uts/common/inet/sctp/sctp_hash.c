@@ -467,6 +467,13 @@ ip_fanout_sctp(mblk_t *mp, ipha_t *ipha, ip6_t *ip6h, uint32_t ports,
 	iaflags_t	iraflags = ira->ira_flags;
 	ill_t		*rill = ira->ira_rill;
 
+	if (sctp_disable) {
+		BUMP_MIB(ill->ill_ip_mib, ipIfStatsInDiscards);
+		ip_drop_input("ipIfStatsInDiscards", mp, ill);
+		freemsg(mp);
+		return;
+	}
+
 	ASSERT(iraflags & IRAF_ICMP_ERROR);
 
 	secure = iraflags & IRAF_IPSEC_SECURE;

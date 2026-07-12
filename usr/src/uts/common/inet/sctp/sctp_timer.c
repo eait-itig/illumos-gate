@@ -805,6 +805,9 @@ sctp_process_timer(sctp_t *sctp)
 {
 	mblk_t *mp;
 
+	if (sctp_disable)
+		return;
+
 	ASSERT(sctp->sctp_running);
 	ASSERT(MUTEX_HELD(&sctp->sctp_lock));
 	while ((mp = sctp->sctp_timer_mp) != NULL) {

@@ -1640,7 +1640,7 @@ ip_output_sw_cksum_v4(mblk_t *mp, ipha_t *ipha, ip_xmit_attr_t *ixa)
 	} else if (protocol == IPPROTO_UDP) {
 		cksump = IPH_UDPH_CHECKSUMP(ipha, ip_hdr_length);
 		cksum = IP_UDP_CSUM_COMP;
-	} else if (protocol == IPPROTO_SCTP) {
+	} else if (protocol == IPPROTO_SCTP && !sctp_disable) {
 		sctp_hdr_t	*sctph;
 
 		ASSERT(MBLKL(mp) >= (ip_hdr_length + sizeof (*sctph)));
@@ -1729,7 +1729,7 @@ ip_output_cksum_v4(iaflags_t ixaflags, mblk_t *mp, ipha_t *ipha,
 	} else if (protocol == IPPROTO_UDP) {
 		cksump = IPH_UDPH_CHECKSUMP(ipha, ip_hdr_length);
 		cksum = IP_UDP_CSUM_COMP;	/* Pseudo-header cksum */
-	} else if (protocol == IPPROTO_SCTP) {
+	} else if (protocol == IPPROTO_SCTP && !sctp_disable) {
 		sctp_hdr_t	*sctph;
 
 		ASSERT(MBLKL(mp) >= (ip_hdr_length + sizeof (*sctph)));
