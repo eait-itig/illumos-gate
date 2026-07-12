@@ -265,6 +265,9 @@ sctp_stack_cpu_add(sctp_stack_t *sctps, processorid_t cpu_seqid)
 {
 	int i;
 
+	if (sctp_disable)
+		return;
+
 	if (cpu_seqid < sctps->sctps_sc_cnt)
 		return;
 	for (i = sctps->sctps_sc_cnt; i <= cpu_seqid; i++) {

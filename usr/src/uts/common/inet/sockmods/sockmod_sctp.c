@@ -31,6 +31,7 @@
 #include <sys/modctl.h>
 #include <sys/cmn_err.h>
 #include <netinet/sctp.h>
+#include <inet/sctp/sctp_impl.h>
 #include <fs/sockfs/sockcommon.h>
 #include "socksctp.h"
 
@@ -124,6 +125,11 @@ socksctp_create(struct sockparams *sp, int family, int type, int protocol,
 	int kmflags = (sflags & SOCKET_NOSLEEP) ? KM_NOSLEEP : KM_SLEEP;
 
 	if (version == SOV_STREAM) {
+		*errorp = EINVAL;
+		return (NULL);
+	}
+
+	if (sctp_disable) {
 		*errorp = EINVAL;
 		return (NULL);
 	}

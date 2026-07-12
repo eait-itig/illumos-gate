@@ -2221,6 +2221,9 @@ ip_input_cksum_v4(iaflags_t iraflags, mblk_t *mp, ipha_t *ipha,
 		sctp_hdr_t	*sctph;
 		uint32_t	pktsum;
 
+		if (sctp_disable)
+			return (B_TRUE);
+
 		sctph = (sctp_hdr_t *)((uchar_t *)ipha + ip_hdr_length);
 #ifdef	DEBUG
 		if (skip_sctp_cksum)
@@ -2385,15 +2388,18 @@ ip_fanout_v4(mblk_t *mp, ipha_t *ipha, ip_recv_attr_t *ira)
 	case IPPROTO_TCP:
 		min_ulp_header_length = TCP_MIN_HEADER_LENGTH;
 		break;
-	case IPPROTO_SCTP:
-		min_ulp_header_length = SCTP_COMMON_HDR_LENGTH;
-		break;
 	case IPPROTO_UDP:
 		min_ulp_header_length = UDPH_SIZE;
 		break;
 	case IPPROTO_ICMP:
 		min_ulp_header_length = ICMPH_SIZE;
 		break;
+	case IPPROTO_SCTP:
+		if (!sctp_disable) {
+			min_ulp_header_length = SCTP_COMMON_HDR_LENGTH;
+			break;
+		}
+		/* FALLTHROUGH */
 	default:
 		min_ulp_header_length = 0;
 		break;
@@ -2569,6 +2575,9 @@ ip_fanout_v4(mblk_t *mp, ipha_t *ipha, ip_recv_attr_t *ira)
 		in6_addr_t	map_src, map_dst;
 		uint32_t	ports;	/* Source and destination ports */
 		sctp_stack_t	*sctps = ipst->ips_netstack->netstack_sctp;
+
+		if (sctp_disable)
+			goto discard;
 
 		/* For SCTP, discard broadcast and multicast packets. */
 		if (iraflags & IRAF_MULTIBROADCAST)

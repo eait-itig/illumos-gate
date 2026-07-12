@@ -68,6 +68,7 @@
 #include <inet/ipdrop.h>
 #include <inet/ipclassifier.h>
 #include <inet/sctp_ip.h>
+#include <inet/sctp/sctp_impl.h>
 #include <sys/tsol/tnet.h>
 
 /*
@@ -6706,6 +6707,9 @@ ipsec_sctp_pol(ipsec_selector_t *sel, ipsec_policy_t **ppp,
 	conn_t		*connp;
 	uint32_t	ports;
 	uint16_t	*pptr = (uint16_t *)&ports;
+
+	if (sctp_disable)
+		return;
 
 	/*
 	 * Find SCP state in the following order:

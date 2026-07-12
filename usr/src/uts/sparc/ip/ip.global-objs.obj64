@@ -222,6 +222,7 @@ sctp_asconf_default_dispatch
 sctp_asconf_dispatch_tbl
 sctp_conn_cache
 sctp_conn_hash_size
+sctp_disable
 sctp_do_reclaim
 sctp_kmem_faddr_cache
 sctp_kmem_ftsn_set_cache

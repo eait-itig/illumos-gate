@@ -584,6 +584,8 @@ ipcl_conn_create(uint32_t type, int sleep, netstack_t *ns)
 
 	switch (type) {
 	case IPCL_SCTPCONN:
+		if (sctp_disable)
+			return (NULL);
 		if ((connp = kmem_cache_alloc(sctp_conn_cache, sleep)) == NULL)
 			return (NULL);
 		sctp_conn_init(connp);

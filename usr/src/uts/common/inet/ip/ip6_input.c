@@ -1866,6 +1866,9 @@ ip_input_cksum_v6(iaflags_t iraflags, mblk_t *mp, ip6_t *ip6h,
 		sctp_hdr_t	*sctph;
 		uint32_t	pktsum;
 
+		if (sctp_disable)
+			return (B_TRUE);
+
 		sctph = (sctp_hdr_t *)((uchar_t *)ip6h + ip_hdr_length);
 #ifdef	DEBUG
 		if (skip_sctp_cksum)
@@ -2041,9 +2044,6 @@ repeat:
 	case IPPROTO_TCP:
 		min_ulp_header_length = TCP_MIN_HEADER_LENGTH;
 		break;
-	case IPPROTO_SCTP:
-		min_ulp_header_length = SCTP_COMMON_HDR_LENGTH;
-		break;
 	case IPPROTO_UDP:
 		min_ulp_header_length = UDPH_SIZE;
 		break;
@@ -2056,6 +2056,12 @@ repeat:
 	case IPPROTO_ROUTING:
 		min_ulp_header_length = MIN_EHDR_LEN;
 		break;
+	case IPPROTO_SCTP:
+		if (!sctp_disable) {
+			min_ulp_header_length = SCTP_COMMON_HDR_LENGTH;
+			break;
+		}
+		/* FALLTHROUGH */
 	default:
 		min_ulp_header_length = 0;
 		break;
@@ -2221,6 +2227,9 @@ repeat:
 		sctp_hdr_t	*sctph;
 		uint32_t	ports;	/* Source and destination ports */
 		sctp_stack_t	*sctps = ipst->ips_netstack->netstack_sctp;
+
+		if (sctp_disable)
+			goto discard;
 
 		/* For SCTP, discard multicast packets. */
 		if (iraflags & IRAF_MULTIBROADCAST)

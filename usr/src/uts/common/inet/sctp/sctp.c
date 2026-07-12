@@ -71,6 +71,7 @@
 #include "sctp_addr.h"
 #include "sctp_asconf.h"
 
+int sctp_disable = 1;
 int sctpdebug;
 sin6_t	sctp_sin6_null;	/* Zero address for quick clears */
 
@@ -1499,6 +1500,9 @@ sctp_create(void *ulpd, sctp_t *parent, int family, int type, int flags,
 void
 sctp_ddi_g_init(void)
 {
+	if (sctp_disable)
+		return;
+
 	/* Create sctp_t/conn_t cache */
 	sctp_conn_cache_init();
 

@@ -1323,7 +1323,7 @@ conn_ixa_cleanup(conn_t *connp, void *arg)
 			    connp, NULL, SQ_PROCESS, SQTAG_TCP_IXA_CLEANUP);
 		}
 		tcp_ixa_cleanup_wait_and_finish(connp);
-	} else if (IPCL_IS_SCTP(connp)) {
+	} else if (IPCL_IS_SCTP(connp) && !sctp_disable) {
 		sctp_t	*sctp;
 		sctp_faddr_t *fp;
 

@@ -55,6 +55,7 @@
 #include <netinet/sctp.h>
 #include <inet/sctp_itf.h>
 #include <fs/sockfs/sockcommon.h>
+#include <inet/sctp/sctp_impl.h>
 #include "socksctp.h"
 
 /*
@@ -190,6 +191,9 @@ sosctp_init(struct sonode *so, struct sonode *pso, struct cred *cr, int flags)
 	sctp_sockbuf_limits_t sbl;
 	int err;
 
+	if (sctp_disable)
+		return (EPROTO);
+
 	ss = SOTOSSO(so);
 
 	if (pso != NULL) {
@@ -248,6 +252,9 @@ sosctp_accept(struct sonode *so, int fflag, struct cred *cr,
 {
 	int error = 0;
 
+	if (sctp_disable)
+		return (EPROTO);
+
 	if ((so->so_state & SS_ACCEPTCONN) == 0)
 		return (EINVAL);
 
@@ -265,6 +272,9 @@ sosctp_bind(struct sonode *so, struct sockaddr *name, socklen_t namelen,
     int flags, struct cred *cr)
 {
 	int error;
+
+	if (sctp_disable)
+		return (EPROTO);
 
 	if (!(flags & _SOBIND_LOCK_HELD)) {
 		mutex_enter(&so->so_lock);
@@ -316,6 +326,9 @@ static int
 sosctp_listen(struct sonode *so, int backlog, struct cred *cr)
 {
 	int error = 0;
+
+	if (sctp_disable)
+		return (EPROTO);
 
 	mutex_enter(&so->so_lock);
 	so_lock_single(so);
@@ -372,6 +385,9 @@ sosctp_connect(struct sonode *so, struct sockaddr *name,
 	pid_t pid = curproc->p_pid;
 
 	ASSERT(so->so_type == SOCK_STREAM);
+
+	if (sctp_disable)
+		return (EPROTO);
 
 	mutex_enter(&so->so_lock);
 	so_lock_single(so);
@@ -454,6 +470,9 @@ sosctp_seq_connect(struct sonode *so, struct sockaddr *name,
 
 	ASSERT(so->so_type == SOCK_SEQPACKET);
 
+	if (sctp_disable)
+		return (EPROTO);
+
 	mutex_enter(&so->so_lock);
 	so_lock_single(so);
 
@@ -500,6 +519,9 @@ sosctp_recvmsg(struct sonode *so, struct nmsghdr *msg, struct uio *uiop,
 	void *opt;
 	mblk_t *mp;
 	rval_t	rval;
+
+	if (sctp_disable)
+		return (EPROTO);
 
 	controllen = msg->msg_controllen;
 	namelen = msg->msg_namelen;
@@ -687,6 +709,9 @@ sosctp_uiomove(mblk_t *hdr_mp, ssize_t count, ssize_t blk_size, int wroff,
 	mblk_t *mp;
 	dblk_t *dp;
 
+	if (sctp_disable)
+		return (EPROTO);
+
 	if (blk_size == INFPSZ)
 		blk_size = count;
 
@@ -743,6 +768,9 @@ sosctp_sendmsg(struct sonode *so, struct nmsghdr *msg, struct uio *uiop,
 	int error;
 
 	ASSERT(so->so_type == SOCK_STREAM);
+
+	if (sctp_disable)
+		return (EPROTO);
 
 	flags = msg->msg_flags;
 	if (flags & MSG_OOB) {
@@ -947,6 +975,9 @@ sosctp_seq_sendmsg(struct sonode *so, struct nmsghdr *msg, struct uio *uiop,
 
 	ASSERT(so->so_type == SOCK_SEQPACKET);
 
+	if (sctp_disable)
+		return (EPROTO);
+
 	/*
 	 * There shouldn't be problems with alignment, as the memory for
 	 * msg_control was alloced with kmem_alloc.
@@ -1140,6 +1171,8 @@ static int
 sosctp_getpeername(struct sonode *so, struct sockaddr *addr, socklen_t *addrlen,
     boolean_t accept, struct cred *cr)
 {
+	if (sctp_disable)
+		return (EPROTO);
 	return (sctp_getpeername((struct sctp_s *)so->so_proto_handle, addr,
 	    addrlen));
 }
@@ -1152,6 +1185,8 @@ static int
 sosctp_getsockname(struct sonode *so, struct sockaddr *addr, socklen_t *addrlen,
     struct cred *cr)
 {
+	if (sctp_disable)
+		return (EPROTO);
 	return (sctp_getsockname((struct sctp_s *)so->so_proto_handle, addr,
 	    addrlen));
 }
@@ -1166,6 +1201,9 @@ sosctp_shutdown(struct sonode *so, int how, struct cred *cr)
 	uint_t state_change;
 	int wakesig = 0;
 	int error = 0;
+
+	if (sctp_disable)
+		return (EPROTO);
 
 	mutex_enter(&so->so_lock);
 	/*
@@ -1240,6 +1278,9 @@ sosctp_getsockopt(struct sonode *so, int level, int option_name,
 	void	*optbuf = &buffer;
 	int	error = 0;
 
+	if (sctp_disable)
+		return (EPROTO);
+
 	if (level == SOL_SOCKET) {
 		switch (option_name) {
 		/* Not supported options */
@@ -1306,6 +1347,9 @@ sosctp_setsockopt(struct sonode *so, int level, int option_name,
 	sctp_assoc_t id;
 	int error, rc;
 	void *conn = NULL;
+
+	if (sctp_disable)
+		return (EPROTO);
 
 	mutex_enter(&so->so_lock);
 
@@ -1449,6 +1493,9 @@ sosctp_ioctl(struct sonode *so, int cmd, intptr_t arg, int mode,
 	STRUCT_DECL(sctpopt, opt);
 	uint32_t		optlen;
 	int			buflen;
+
+	if (sctp_disable)
+		return (EPROTO);
 
 	ss = SOTOSSO(so);
 
