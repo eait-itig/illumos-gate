@@ -535,7 +535,7 @@ mlxcx_mac_ring_tx(void *arg, mblk_t *mp)
 	 * This can often return error in cases where we actually have
 	 * some subset of valid headers (e.g. on IP fragments)
 	 */
-	(void) mac_ether_offload_info(mp, &meoi);
+	(void) mac_ether_offload_info(mp, &meoi, NULL);
 	if ((meoi.meoi_flags & MEOI_L2INFO_SET) == 0) {
 		/*
 		 * We got given a frame without a valid L2 header on it. We
